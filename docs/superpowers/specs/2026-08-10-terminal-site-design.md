@@ -36,22 +36,51 @@ Explicitly out of scope. Each is a reasonable follow-up, none is in this build:
 ## Threat model
 
 The server spawns a login shell with the full user environment. Anyone who can reach
-the port owns the machine. This is a personal, localhost-only tool, defended in two
-layers:
+the port owns the machine. This is a personal, single-user, localhost-only tool.
+
+### What is defended
 
 1. **Bind + Origin allowlist.** The server listens on `127.0.0.1` only. WebSocket
    upgrades are rejected unless `Origin` is `http://127.0.0.1:<port>` or
-   `http://localhost:<port>`. The allowlist is *derived from the configured host and
-   port* rather than hardcoded to 3000, so setting `PORT` cannot silently lock the app
-   out of its own socket. Browsers always send `Origin` on WebSocket upgrades, so
-   this stops a page you happen to visit from opening a socket to your shell
-   (cross-site WebSocket hijacking).
+   `http://localhost:<port>`. Both loopback spellings are hardcoded; only the *port*
+   is substituted (`server/auth.ts` takes the port and nothing else), so setting
+   `PORT` cannot silently lock the app out of its own socket. Browsers always send
+   `Origin` on WebSocket upgrades, so this stops a page you happen to visit from
+   opening a socket to your shell (cross-site WebSocket hijacking).
 2. **Boot token.** 32 random bytes generated once per server process, embedded in the
-   page by a Server Component and echoed back in the handshake. A cross-origin
-   attacker cannot read our HTML, so it cannot produce the token. This covers the
-   cases `Origin` does not: non-browser local clients, and DNS rebinding.
+   page by a Server Component and echoed back in the handshake.
 
-The README must state plainly that this exposes a shell and is localhost-only.
+Between them these cover:
+
+- **Cross-site WebSocket hijacking** — the `Origin` check rejects it, and a
+  cross-origin page cannot read our HTML to obtain the token either.
+- **DNS rebinding** — an attacker who rebinds a hostname they control to `127.0.0.1`
+  sends *their own* origin, which fails the allowlist; and even if the origin check
+  were bypassed, the same-origin policy still prevents them reading the token out of
+  our page.
+- **Stale or reloaded pages** — the token is per-process, so a page left open across
+  a server restart is rejected rather than silently reattaching.
+
+### What is *not* defended
+
+**The token is not a secret from the local machine.** It is served in the page body
+to anyone who can make an HTTP request to the port. A non-browser client can fetch
+`/`, scrape the token, set the `Origin` header to `http://127.0.0.1:<port>` by hand,
+and obtain a live shell. This has been verified, not assumed.
+
+Neither layer protects against that, and neither is intended to:
+
+- Any process running as you can already run anything as you, so on a single-user
+  machine this grants nothing new.
+- **On a multi-user machine it is a privilege escalation.** Loopback is not
+  uid-scoped: any *other* local user can read the page and get a shell as you.
+
+There is no defence against this in the design. Any process — or any other user — on
+this machine can read the page and obtain a shell as you, **so do not run this on a
+shared machine.**
+
+The README must state plainly that this exposes a shell, is localhost-only, and is
+unsafe on a multi-user machine.
 
 ## Architecture
 
@@ -90,6 +119,35 @@ This replaces the example's `\x1b[RESIZE:80;24]` sequence embedded in the input
 stream. That approach means pasted text containing the sequence is swallowed as a
 resize instead of reaching the shell.
 
+The PTY is opened with `encoding: null` so this layer is honest about it. node-pty
+defaults to `encoding: 'utf8'`, which decodes PTY output to a string and substitutes
+U+FFFD for every invalid byte *before* the server sees it; re-encoding that string
+cannot recover the original. With `encoding: null` node-pty hands back `Buffer` and
+`server/pty-session.ts` forwards it unmodified.
+
+Inbound frames still transit a UTF-8 string, which is lossless in practice because the
+browser only ever sends `TextEncoder` output.
+
+**Known deviation: "raw PTY bytes" is not true end-to-end, and cannot be.** Measured,
+not assumed — the same `printf '<\x80\xfe\xff>'` through a bare shell and through
+tmux, both on a `encoding: null` PTY:
+
+| Path | Invalid bytes preserved | U+FFFD introduced |
+|---|---|---|
+| node-pty → bare shell | yes | no |
+| node-pty → **tmux** → shell | **no** | **yes** |
+
+tmux is a terminal emulator, not a pipe: it parses program output into a cell grid and
+re-encodes for the attached client, and invalid UTF-8 does not survive that. The
+substitution happens inside tmux, upstream of anything this codebase controls. Fixing
+it would mean giving up tmux, i.e. giving up persistence — the entire point of the
+design. So non-UTF-8 program output *is* still lossy in a pane; `encoding: null`
+removes the one lossy hop we own, and is a prerequisite for any future raw
+(non-persistent) pane mode. Multibyte UTF-8 round-trips intact, verified end-to-end.
+
+Inbound frames are capped at 1 MiB (`maxPayload`), well above any realistic paste and
+far below `ws`'s 100 MiB default.
+
 ### Control messages
 
 ```jsonc
@@ -100,7 +158,18 @@ resize instead of reaching the shell.
 // server → client
 { "type": "ready" }
 { "type": "error", "message": "tmux not found on PATH" }
+{ "type": "error", "message": "unauthorized", "code": "unauthorized" }
 ```
+
+`error.code` is optional and machine-readable; `message` is human-readable and
+unstable. The client branches on `code`, never on prose. Parsing stays strict: an
+unrecognised `code` is rejected outright rather than degraded to a codeless error.
+
+The only code so far is `unauthorized`. Because the boot token is per-process and
+baked into the page HTML, a rejected token means the server has restarted since the
+page rendered — reconnecting can only replay the same dead token. The pane therefore
+offers **Reload**, not Restart, for that code. Without it, a server restart leaves
+every pane in a loop: `ended` → Restart → `unauthorized` → Restart → …
 
 `hello` carries pane identity, credential, and initial size in one message, replacing
 the example's query parameter plus separate initial resize. The token travels in the
@@ -136,7 +205,7 @@ message rather than letting the pane die on an opaque `ENOENT`.
 | Socket closes (reload, tab close) | PTY killed → tmux client detaches → **session survives** |
 | tmux client exits (`exit`, detach) | PTY exits → socket closes → pane shows `[session ended]` + Restart |
 | Restart clicked | New socket, new `hello`; `-A` reattaches or recreates |
-| Server restarts | All four sessions still present; reattach on next load |
+| Server restarts | All four sessions still present. Open pages hold a dead token, so their panes show `error` with `code: "unauthorized"` and offer **Reload**; the reloaded page gets the new token and reattaches |
 
 ## Modules
 
@@ -184,7 +253,14 @@ clamp to 10–90% and persist to `localStorage`.
 ### Pane states
 
 `loading-core` → `connecting` → `ready`, plus `ended` (with Restart) and `error`
-(tmux missing, auth rejected).
+(tmux missing, spawn failed, auth rejected).
+
+Every non-`ready` state renders an overlay, including `connecting` — otherwise a pane
+whose handshake never completes looks exactly like a working one that has produced no
+output yet. Exactly one overlay is chosen, most-fatal first (core failure → socket
+error → ended → core loading → connecting), so two `inset: 0` panels can never stack.
+An overlay with no button sets `pointer-events: none` so it cannot swallow clicks
+meant for the terminal underneath.
 
 ## Implementation details worth stating
 
@@ -198,6 +274,21 @@ instance is per-pane.
 **`app/page.tsx` must be `dynamic = "force-dynamic"`.** It renders the boot token. A
 statically prerendered page would embed the token from whenever `next build` ran, and
 every socket would fail auth under `next start`.
+
+**Every WebSocket needs an `'error'` listener.** `ws` emits `'error'` on the
+`WebSocket` object for receiver faults, and a `maxPayload` violation is one — reachable
+by pasting more than 1 MiB into a pane, no attacker required. An `EventEmitter`
+`'error'` with no listener throws, and the throw would only be absorbed by the global
+`uncaughtException` handler Next happens to install, leaving a process that owns four
+PTYs in an explicitly undefined state. Listeners are therefore attached to the `ws`
+instance, to the raw upgrade socket on the 403 reject path (Node's `'upgrade'`
+contract hands over that socket, errors included), and to the `WebSocketServer`.
+
+**`spawn()` can throw.** node-pty throws synchronously at fork time on EAGAIN/EMFILE,
+`posix_spawnp failed`, or a native ABI mismatch. That throw happens inside the socket's
+message handler, after the hello watchdog has been cleared — so unguarded it produces
+a pane stuck at `connecting` with nothing on the wire. The spawn is wrapped and routed
+through the same `error` frame path as a missing tmux.
 
 **Resize is throttled.** Dragging a divider fires `ResizeObserver` at frame rate;
 unthrottled that is four tmux resizes per frame, and tmux redraws the full screen on
@@ -253,8 +344,14 @@ binary fails the test run instead of producing a subtly broken terminal.
 
 Where the real confidence is — WASM plus PTY cannot be meaningfully unit tested.
 
-- All four panes reach `ready`.
-- `echo hi` typed in pane 2 appears in pane 2 and in no other pane.
+- All four panes reach `ready`. Asserted via `role="textbox"`, which only exists once
+  that pane's core has mounted. Asserting on the pane element itself proves nothing:
+  `role="group"` renders unconditionally, before the core loads and before any socket
+  exists, so a negative isolation assertion against it would pass for a pane that
+  never connected at all.
+- A distinct marker is echoed in *every* pane and each is asserted present in its own
+  pane and absent from all others — isolation checked in both directions, not just
+  from one pane outward.
 - Dragging the divider reflows all four panes.
 - **Reload preserves the session** — write a marker, reload, assert it is still on
   screen. This is the entire justification for the tmux decision and no unit test can
@@ -264,13 +361,14 @@ Skipped with a clear message if `tmux` is not on `PATH`.
 
 ## Definition of done
 
-Per `INIT.md`, not done until all four pass:
+Per `INIT.md`, not done until all of these pass:
 
 ```
 npm run lint
 npm run type-check
 npm test
 npm run build
+npm run test:e2e   # requires tmux
 ```
 
 No commits and no pushes without explicit approval.

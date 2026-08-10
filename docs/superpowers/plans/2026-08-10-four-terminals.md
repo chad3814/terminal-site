@@ -10,6 +10,30 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-10-terminal-site-design.md`
 
+## Status: implemented, then amended by whole-branch review
+
+All 13 tasks below were completed. A final review then changed behaviour in ways this
+plan's code blocks predate. **The code and the spec are authoritative; the code blocks
+below are a historical record of the plan as written, not of what shipped.**
+
+Deliberately not retro-fitted: this plan materialises near-complete file contents for
+every task, so keeping it in sync would mean re-transcribing most of the codebase into
+a document whose purpose (driving the original task-by-task execution) is finished.
+The divergences are enumerated here instead.
+
+| Change | Stale plan sections |
+|---|---|
+| `ErrorMessage` gained an optional machine-readable `code` (`ErrorCode = "unauthorized"`); `parseServerMessage` rejects an unrecognised code | Task 2 — `shared/protocol.ts` interface list, source block, `parseServerMessage` |
+| `PtyHandle.onData` yields `Buffer`, not `string`; the PTY is spawned with `encoding: null` so non-UTF-8 output is not replaced with U+FFFD | Task 5 — `PtyHandle` interface, `makePty` fake, `handle.onData` forward; Task 6 — `pty.spawn` call |
+| `spawn()` is wrapped in try/catch and routed through `fail()` — node-pty throws at fork time | Task 5 — `start()` |
+| `fail()` takes an optional `ErrorCode`; the auth-failure path sends `code: "unauthorized"` | Task 5 — `fail()`, `socket.onMessage` |
+| `'error'` listeners on the `ws` instance, the raw upgrade socket on the 403 path, and the `WebSocketServer`. Without them a >1 MiB paste kills the process | Task 6 — `server.on("upgrade")` block |
+| `hello` reads `sizeRef.current` at `onopen` rather than the size captured at `connect()` | Task 11 — `lib/use-pty-socket.ts` `connect()` |
+| `usePtySocket` returns `errorCode` | Task 11 — `UsePtySocket` interface, return statement |
+| `TerminalPane` renders exactly one overlay (most-fatal first), adds a `connecting` overlay, and offers **Reload** instead of **Restart** for `code: "unauthorized"` | Task 12 — `components/terminal-pane.tsx` |
+| `TerminalGrid` derives its pane count from `PANE_COUNT`; `containerRef` is `HTMLElement` | Task 12 — `components/terminal-grid.tsx` |
+| The e2e isolation test asserts `role="textbox"` liveness for every pane first, then a distinct marker per pane checked in both directions | Task 13 — `e2e/terminals.spec.ts` |
+
 ## Global Constraints
 
 These apply to every task. Do not restate them; do not violate them.
