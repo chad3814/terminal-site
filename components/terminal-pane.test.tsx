@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeMessage } from "@/shared/protocol";
@@ -51,6 +51,12 @@ afterEach(() => {
 async function renderPane() {
   render(<TerminalPane pane={1} token="tok" />);
   expect(await screen.findByTestId("fake-terminal")).toBeInTheDocument();
+
+  // The socket is created by onReady, which fires from a passive effect that may
+  // not have flushed when findByTestId resolves. Wait for it explicitly.
+  await waitFor(() => {
+    expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+  });
 }
 
 describe("TerminalPane", () => {
@@ -85,6 +91,9 @@ describe("TerminalPane", () => {
     );
 
     expect(await screen.findByText(/tmux not found on PATH/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /restart/i }));
+    expect(MockWebSocket.instances).toHaveLength(2);
   });
 
   it("labels the pane for assistive technology", async () => {

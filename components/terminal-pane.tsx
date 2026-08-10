@@ -26,9 +26,7 @@ export function TerminalPane({ pane, token, className }: TerminalPaneProps): JSX
 
   const { ref, write } = useTerminal();
 
-  const writeBytes = useCallback((data: Uint8Array) => write(data), [write]);
-
-  const socket = usePtySocket({ pane, token, write: writeBytes });
+  const socket = usePtySocket({ pane, token, write });
 
   useEffect(() => {
     let cancelled = false;
