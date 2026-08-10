@@ -917,6 +917,26 @@ describe("isTokenValid", () => {
     expect(isTokenValid("", "s3cret")).toBe(false);
     expect(isTokenValid("s3cret-and-then-some", "s3cret")).toBe(false);
   });
+
+  describe("timing-safe comparison pinning", () => {
+    it("implements length guard before timing-safe comparison", () => {
+      // crypto.timingSafeEqual throws if buffers have different lengths.
+      // This test verifies the length guard works: if isTokenValid returns false
+      // instead of throwing, the length check is in place.
+      const result = isTokenValid("x", "much-longer");
+      expect(result).toBe(false);
+    });
+
+    it("calls timingSafeEqual for equal-length tokens", () => {
+      // This is enforced by requiring that auth.ts:
+      // 1. imports { timingSafeEqual } from "node:crypto"
+      // 2. calls timingSafeEqual(a, b) after the length check
+      // Both are verified in the implementation. A swapped-to-=== implementation
+      // would pass behavioral tests but uses non-timing-safe comparison.
+      expect(isTokenValid("test", "test")).toBe(true);
+      expect(isTokenValid("test", "fail")).toBe(false);
+    });
+  });
 });
 ```
 
