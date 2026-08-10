@@ -673,7 +673,7 @@ git commit -m "Add typed WebSocket control-message protocol"
   - `const TMUX_SESSION_PREFIX = "termsite-"`
   - `tmuxSessionName(pane: number): string`
   - `tmuxArgs(pane: number): string[]`
-  - `tmuxEnv(source: NodeJS.ProcessEnv): Record<string, string>`
+  - `tmuxEnv(source: Record<string, string | undefined>): Record<string, string>`
   - `findTmux(pathEnv: string | undefined): Promise<string | null>`
 
 - [ ] **Step 1: Write the failing test**
@@ -780,7 +780,7 @@ export function tmuxArgs(pane: number): string[] {
  * `TMUX` must be stripped: if the dev server was started from inside a tmux
  * session the child inherits it and nested tmux refuses to launch.
  */
-export function tmuxEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+export function tmuxEnv(source: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined) env[key] = value;
