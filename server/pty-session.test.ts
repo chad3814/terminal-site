@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeMessage } from "@/shared/protocol";
 import {
   attachPtySession,
@@ -28,7 +28,13 @@ function makeSocket(): FakeSocket {
       this.sent.push(data);
     },
     close() {
+      // A real WebSocket fires its own "close" event whenever close() is
+      // called, whether the call originated locally or remotely, and it
+      // only fires once. Mirror that so the exit -> close -> kill feedback
+      // loop this module creates is actually exercised by the fakes.
+      if (this.closed) return;
       this.closed = true;
+      onClose?.();
     },
     onMessage(handler) {
       onMessage = handler;
@@ -43,7 +49,7 @@ function makeSocket(): FakeSocket {
       onMessage?.(Buffer.from(bytes), true);
     },
     emitClose() {
-      onClose?.();
+      this.close();
     },
   };
 }
@@ -122,6 +128,10 @@ function hello(token = TOKEN, pane = 1): string {
   return serializeMessage({ type: "hello", token, pane, cols: 80, rows: 24 });
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("attachPtySession", () => {
   it("spawns tmux with attach-or-create args on a valid hello", () => {
     attach();
@@ -165,7 +175,6 @@ describe("attachPtySession", () => {
     vi.advanceTimersByTime(5001);
     expect(socket.closed).toBe(true);
     expect(spawnArgs).toHaveLength(0);
-    vi.useRealTimers();
   });
 
   it("ignores input and resize before a hello", () => {
@@ -215,6 +224,23 @@ describe("attachPtySession", () => {
     socket.emitText(hello());
     pty.emitExit();
     expect(socket.closed).toBe(true);
+  });
+
+  it("does not kill an already-exited pty when the exit triggers socket close", () => {
+    attach();
+    socket.emitText(hello());
+    pty.emitExit();
+    expect(socket.closed).toBe(true);
+    expect(pty.killed).toBe(false);
+  });
+
+  it("does not send pty output that arrives after teardown", () => {
+    attach();
+    socket.emitText(hello());
+    const framesBeforeExit = socket.sent.length;
+    pty.emitExit();
+    pty.emitData("late output");
+    expect(socket.sent.length).toBe(framesBeforeExit);
   });
 
   it("ignores a second hello", () => {

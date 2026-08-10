@@ -46,6 +46,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
 
   let pty: PtyHandle | null = null;
   let settled = false;
+  let tornDown = false;
 
   const timer = setTimeout(() => {
     if (!settled) {
@@ -80,10 +81,15 @@ export function attachPtySession(deps: PtySessionDeps): void {
     });
 
     handle.onData((data) => {
+      if (tornDown) return;
       socket.send(Buffer.from(data, "utf8"));
     });
 
     handle.onExit(() => {
+      // The process is already gone — drop the handle so teardown does not
+      // kill a dead pid, which can throw ESRCH inside the close handler.
+      pty = null;
+      tornDown = true;
       socket.close();
     });
 
@@ -101,7 +107,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
     if (msg === null) return;
 
     if (msg.type === "hello") {
-      if (settled || pty !== null) return;
+      if (settled) return;
       if (!isTokenValid(msg.token, expectedToken)) {
         fail("unauthorized");
         return;
@@ -115,7 +121,10 @@ export function attachPtySession(deps: PtySessionDeps): void {
 
   socket.onClose(() => {
     clearTimeout(timer);
+    tornDown = true;
+    const handle = pty;
+    pty = null;
     // Killing the PTY detaches the tmux client. The session survives.
-    if (pty !== null) pty.kill();
+    if (handle !== null) handle.kill();
   });
 }

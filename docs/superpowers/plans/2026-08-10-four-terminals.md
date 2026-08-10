@@ -1068,7 +1068,7 @@ The heart of the server. Dependencies are injected so the whole lifecycle is uni
 `server/pty-session.test.ts`:
 
 ```ts
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeMessage } from "@/shared/protocol";
 import {
   attachPtySession,
@@ -1098,7 +1098,13 @@ function makeSocket(): FakeSocket {
       this.sent.push(data);
     },
     close() {
+      // A real WebSocket fires its own "close" event whenever close() is
+      // called, whether the call originated locally or remotely, and it
+      // only fires once. Mirror that so the exit -> close -> kill feedback
+      // loop this module creates is actually exercised by the fakes.
+      if (this.closed) return;
       this.closed = true;
+      onClose?.();
     },
     onMessage(handler) {
       onMessage = handler;
@@ -1113,7 +1119,7 @@ function makeSocket(): FakeSocket {
       onMessage?.(Buffer.from(bytes), true);
     },
     emitClose() {
-      onClose?.();
+      this.close();
     },
   };
 }
@@ -1192,6 +1198,10 @@ function hello(token = TOKEN, pane = 1): string {
   return serializeMessage({ type: "hello", token, pane, cols: 80, rows: 24 });
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("attachPtySession", () => {
   it("spawns tmux with attach-or-create args on a valid hello", () => {
     attach();
@@ -1235,7 +1245,6 @@ describe("attachPtySession", () => {
     vi.advanceTimersByTime(5001);
     expect(socket.closed).toBe(true);
     expect(spawnArgs).toHaveLength(0);
-    vi.useRealTimers();
   });
 
   it("ignores input and resize before a hello", () => {
@@ -1285,6 +1294,23 @@ describe("attachPtySession", () => {
     socket.emitText(hello());
     pty.emitExit();
     expect(socket.closed).toBe(true);
+  });
+
+  it("does not kill an already-exited pty when the exit triggers socket close", () => {
+    attach();
+    socket.emitText(hello());
+    pty.emitExit();
+    expect(socket.closed).toBe(true);
+    expect(pty.killed).toBe(false);
+  });
+
+  it("does not send pty output that arrives after teardown", () => {
+    attach();
+    socket.emitText(hello());
+    const framesBeforeExit = socket.sent.length;
+    pty.emitExit();
+    pty.emitData("late output");
+    expect(socket.sent.length).toBe(framesBeforeExit);
   });
 
   it("ignores a second hello", () => {
@@ -1355,6 +1381,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
 
   let pty: PtyHandle | null = null;
   let settled = false;
+  let tornDown = false;
 
   const timer = setTimeout(() => {
     if (!settled) {
@@ -1389,10 +1416,15 @@ export function attachPtySession(deps: PtySessionDeps): void {
     });
 
     handle.onData((data) => {
+      if (tornDown) return;
       socket.send(Buffer.from(data, "utf8"));
     });
 
     handle.onExit(() => {
+      // The process is already gone — drop the handle so teardown does not
+      // kill a dead pid, which can throw ESRCH inside the close handler.
+      pty = null;
+      tornDown = true;
       socket.close();
     });
 
@@ -1410,7 +1442,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
     if (msg === null) return;
 
     if (msg.type === "hello") {
-      if (settled || pty !== null) return;
+      if (settled) return;
       if (!isTokenValid(msg.token, expectedToken)) {
         fail("unauthorized");
         return;
@@ -1424,8 +1456,11 @@ export function attachPtySession(deps: PtySessionDeps): void {
 
   socket.onClose(() => {
     clearTimeout(timer);
+    tornDown = true;
+    const handle = pty;
+    pty = null;
     // Killing the PTY detaches the tmux client. The session survives.
-    if (pty !== null) pty.kill();
+    if (handle !== null) handle.kill();
   });
 }
 ```
@@ -1436,7 +1471,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
 npx vitest run server/pty-session.test.ts && npm run lint && npm run type-check
 ```
 
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit** *(ask for approval first)*
 
