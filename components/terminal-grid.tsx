@@ -9,6 +9,7 @@ import {
   serializeSplit,
   type SplitState,
 } from "@/lib/split-layout";
+import { PANE_COUNT } from "@/shared/protocol";
 import { SplitDivider } from "./split-divider";
 import { TerminalPane } from "./terminal-pane";
 import styles from "./terminal-grid.module.css";
@@ -17,6 +18,10 @@ export interface TerminalGridProps {
   token: string;
 }
 
+// One grid-placement class per pane, indexed by pane id. `PANE_COUNT` in
+// shared/protocol.ts is authoritative (the server validates `hello.pane`
+// against it), so the count is derived from there rather than from this
+// array's length.
 const CELL_CLASSES = [styles.cell00, styles.cell01, styles.cell10, styles.cell11];
 
 export function TerminalGrid({ token }: TerminalGridProps): JSX.Element {
@@ -24,7 +29,8 @@ export function TerminalGrid({ token }: TerminalGridProps): JSX.Element {
   // the server renders this markup too, and a mismatch would break hydration.
   const [split, setSplit] = useState<SplitState>(DEFAULT_SPLIT);
   const [restored, setRestored] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Attached to a <main>, not a <div>.
+  const containerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     setSplit(parseStoredSplit(window.localStorage.getItem(SPLIT_STORAGE_KEY)));
@@ -53,8 +59,8 @@ export function TerminalGrid({ token }: TerminalGridProps): JSX.Element {
         gridTemplateRows: gridTemplate(split.row),
       }}
     >
-      {CELL_CLASSES.map((cellClass, pane) => (
-        <TerminalPane key={pane} pane={pane} token={token} className={cellClass} />
+      {Array.from({ length: PANE_COUNT }, (_unused, pane) => (
+        <TerminalPane key={pane} pane={pane} token={token} className={CELL_CLASSES[pane]} />
       ))}
 
       <SplitDivider

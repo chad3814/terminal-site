@@ -2,6 +2,9 @@
   "name": "terminal-site",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "next build",

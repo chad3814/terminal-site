@@ -8,10 +8,10 @@ import { MockWebSocket } from "@/test/mock-websocket";
 // `vi.mock` factories are hoisted above module scope, so a plain `const` declared
 // here would not yet exist when the factory closes over it. `vi.hoisted` is the
 // supported way to share a spy with a mock factory.
-const { writeSpy } = vi.hoisted(() => ({ writeSpy: vi.fn() }));
+const { writeSpy, coreLoad } = vi.hoisted(() => ({ writeSpy: vi.fn(), coreLoad: vi.fn() }));
 
 vi.mock("@wterm/ghostty", () => ({
-  GhosttyCore: { load: vi.fn(async () => ({ kind: "fake-core" })) },
+  GhosttyCore: { load: coreLoad },
 }));
 
 vi.mock("@wterm/react/css", () => ({}));
@@ -42,6 +42,8 @@ beforeEach(() => {
   MockWebSocket.reset();
   MockWebSocket.install();
   writeSpy.mockClear();
+  coreLoad.mockReset();
+  coreLoad.mockResolvedValue({ kind: "fake-core" });
 });
 
 afterEach(() => {
@@ -94,6 +96,51 @@ describe("TerminalPane", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /restart/i }));
     expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("offers a reload, not a restart, when the token was rejected", async () => {
+    await renderPane();
+    act(() => MockWebSocket.last().open());
+    act(() =>
+      MockWebSocket.last().receive(
+        serializeMessage({ type: "error", message: "unauthorized", code: "unauthorized" }),
+      ),
+    );
+
+    expect(await screen.findByText(/server restarted — reload the page/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
+
+    const reload = vi.fn();
+    vi.stubGlobal("location", { ...window.location, reload });
+
+    await userEvent.click(screen.getByRole("button", { name: /reload/i }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    // The dead token must not be replayed over a fresh socket.
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it("shows a connecting overlay until the session is ready", async () => {
+    await renderPane();
+    act(() => MockWebSocket.last().open());
+
+    expect(await screen.findByText(/connecting/i)).toBeInTheDocument();
+
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+    await waitFor(() => {
+      expect(screen.queryByText(/connecting/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows only one overlay when the core fails and the socket errors", async () => {
+    coreLoad.mockRejectedValueOnce(new Error("wasm exploded"));
+    render(<TerminalPane pane={0} token="tok" />);
+
+    expect(await screen.findByText(/failed to load terminal core/i)).toBeInTheDocument();
+    // The core never mounted, so no socket exists and no second overlay can
+    // stack on top of this one.
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(screen.queryByText(/loading terminal core/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/connecting/i)).not.toBeInTheDocument();
   });
 
   it("labels the pane for assistive technology", async () => {

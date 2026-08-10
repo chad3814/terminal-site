@@ -58,12 +58,12 @@ interface FakePty extends PtyHandle {
   written: string[];
   resizes: [number, number][];
   killed: boolean;
-  emitData(data: string): void;
+  emitData(data: Buffer): void;
   emitExit(): void;
 }
 
 function makePty(): FakePty {
-  let onData: ((data: string) => void) | null = null;
+  let onData: ((data: Buffer) => void) | null = null;
   let onExit: (() => void) | null = null;
   return {
     written: [],
@@ -160,6 +160,40 @@ describe("attachPtySession", () => {
     expect(textFrames(socket)[0]).toContain("unauthorized");
   });
 
+  it("tags the auth failure with a machine-readable code", () => {
+    attach();
+    socket.emitText(hello("wrong-token"));
+
+    expect(textFrames(socket)[0]).toBe(
+      serializeMessage({ type: "error", message: "unauthorized", code: "unauthorized" }),
+    );
+  });
+
+  it("leaves the code off errors that are not auth failures", () => {
+    attach({ tmuxPath: null });
+    socket.emitText(hello());
+
+    const frame = textFrames(socket)[0];
+    if (frame === undefined) throw new Error("no error frame was sent");
+    expect(JSON.parse(frame)).not.toHaveProperty("code");
+  });
+
+  it("reports a spawn that throws instead of hanging the pane", () => {
+    const boom: SpawnPty = () => {
+      throw new Error("posix_spawnp failed");
+    };
+    attach({ spawn: boom });
+    socket.emitText(hello());
+
+    expect(textFrames(socket)[0]).toBe(
+      serializeMessage({
+        type: "error",
+        message: "failed to start shell: posix_spawnp failed",
+      }),
+    );
+    expect(socket.closed).toBe(true);
+  });
+
   it("reports a readable error when tmux is missing", () => {
     attach({ tmuxPath: null });
     socket.emitText(hello());
@@ -191,10 +225,27 @@ describe("attachPtySession", () => {
     socket.emitBinary(new TextEncoder().encode("echo hi\n"));
     expect(pty.written).toEqual(["echo hi\n"]);
 
-    pty.emitData("hi\r\n");
+    pty.emitData(Buffer.from("hi\r\n", "utf8"));
     const binary = socket.sent.filter((f): f is Uint8Array => typeof f !== "string");
     expect(binary).toHaveLength(1);
     expect(new TextDecoder().decode(binary[0])).toBe("hi\r\n");
+  });
+
+  it("forwards pty bytes that are not valid UTF-8 without substitution", () => {
+    attach();
+    socket.emitText(hello());
+
+    // A lone 0x80 continuation byte: any decode-then-re-encode round trip
+    // turns this into the three bytes of U+FFFD. This pins the contract of
+    // *this* module only. End to end a pane is still lossy for non-UTF-8
+    // output, because tmux re-encodes it upstream of here — see the
+    // "Known deviation" table in the spec's Transport section.
+    const raw = Buffer.from([0x68, 0x80, 0xff, 0x69]);
+    pty.emitData(raw);
+
+    const binary = socket.sent.filter((f): f is Uint8Array => typeof f !== "string");
+    expect(binary).toHaveLength(1);
+    expect(Buffer.from(binary[0] ?? new Uint8Array()).equals(raw)).toBe(true);
   });
 
   it("forwards resize after hello", () => {
@@ -239,7 +290,7 @@ describe("attachPtySession", () => {
     socket.emitText(hello());
     const framesBeforeExit = socket.sent.length;
     pty.emitExit();
-    pty.emitData("late output");
+    pty.emitData(Buffer.from("late output", "utf8"));
     expect(socket.sent.length).toBe(framesBeforeExit);
   });
 

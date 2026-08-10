@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, test, type Page } from "@playwright/test";
+// Relative, not the "@/" alias: e2e/ is excluded from tsconfig.json, so the
+// path mapping is not in scope for these files.
+import { PANE_COUNT } from "../shared/protocol";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,7 +17,7 @@ async function hasTmux(): Promise<boolean> {
 }
 
 async function killSessions(): Promise<void> {
-  for (let pane = 0; pane < 4; pane += 1) {
+  for (let pane = 0; pane < PANE_COUNT; pane += 1) {
     try {
       await execFileAsync("tmux", ["kill-session", "-t", `termsite-${pane}`]);
     } catch {
@@ -59,19 +62,33 @@ test.afterAll(async () => {
   await killSessions();
 });
 
-test("four panes attach to four independent shells", async ({ page }) => {
+test("every pane attaches to its own independent shell", async ({ page }) => {
   await page.goto("/");
 
-  for (let index = 0; index < 4; index += 1) {
-    await expect(pane(page, index)).toBeVisible();
+  // Liveness before isolation. `role="group"` renders unconditionally, before
+  // the WASM core loads and before any socket exists, so asserting on the
+  // pane alone would let a `not.toContainText` pass for a pane that never
+  // connected at all. `role="textbox"` only exists once the core has mounted,
+  // so waiting on all of them pins "every core loaded" first.
+  for (let index = 0; index < PANE_COUNT; index += 1) {
+    await expect(pane(page, index).getByRole("textbox")).toBeVisible();
   }
 
-  await typeInPane(page, 1, "echo ISOLATION_MARKER");
+  // A distinct marker per pane, so isolation is checked in both directions:
+  // each marker must appear in its own pane and in no other.
+  for (let index = 0; index < PANE_COUNT; index += 1) {
+    await typeInPane(page, index, `echo MARKER_${index}`);
+  }
 
-  await expect(pane(page, 1)).toContainText("ISOLATION_MARKER");
-  await expect(pane(page, 0)).not.toContainText("ISOLATION_MARKER");
-  await expect(pane(page, 2)).not.toContainText("ISOLATION_MARKER");
-  await expect(pane(page, 3)).not.toContainText("ISOLATION_MARKER");
+  for (let source = 0; source < PANE_COUNT; source += 1) {
+    for (let observer = 0; observer < PANE_COUNT; observer += 1) {
+      if (source === observer) {
+        await expect(pane(page, observer)).toContainText(`MARKER_${source}`);
+      } else {
+        await expect(pane(page, observer)).not.toContainText(`MARKER_${source}`);
+      }
+    }
+  }
 });
 
 test("dragging the column divider reflows the panes", async ({ page }) => {

@@ -17,6 +17,17 @@ export interface TerminalPaneProps {
   className?: string;
 }
 
+interface OverlayAction {
+  label: string;
+  onClick: () => void;
+}
+
+interface OverlayContent {
+  message: string;
+  isError: boolean;
+  action: OverlayAction | null;
+}
+
 export function TerminalPane({ pane, token, className }: TerminalPaneProps): JSX.Element {
   // GhosttyCore is stateful — it owns the terminal buffer, dimensions, and
   // scrollback — so every pane needs its own instance. The .wasm itself is
@@ -44,7 +55,7 @@ export function TerminalPane({ pane, token, className }: TerminalPaneProps): JSX
     };
   }, []);
 
-  const { connect, sendInput, sendResize, restart, status, errorMessage } = socket;
+  const { connect, sendInput, sendResize, restart, status, errorMessage, errorCode } = socket;
 
   const handleReady = useCallback(
     (wt: WTerm) => {
@@ -53,8 +64,66 @@ export function TerminalPane({ pane, token, className }: TerminalPaneProps): JSX
     [connect],
   );
 
+  const reload = useCallback(() => {
+    window.location.reload();
+  }, []);
+
   const label = `Terminal ${pane + 1}`;
   const paneClassName = className === undefined ? styles.pane : `${styles.pane} ${className}`;
+
+  // Exactly one overlay, chosen most-fatal first. Rendering these as
+  // independent conditionals let a core-load failure and a socket error stack
+  // two `inset: 0` panels on top of each other, with the later one silently
+  // hiding the earlier.
+  const overlay = ((): OverlayContent | null => {
+    if (coreError !== null) {
+      return {
+        message: `Failed to load terminal core: ${coreError}`,
+        isError: true,
+        action: null,
+      };
+    }
+    if (status === "error") {
+      // The boot token is per-process and baked into the page HTML, so a
+      // rejected token means the server restarted since this page rendered.
+      // Reconnecting replays the same dead token; only a reload can fix it.
+      if (errorCode === "unauthorized") {
+        return {
+          message: "Server restarted — reload the page",
+          isError: true,
+          action: { label: "Reload", onClick: reload },
+        };
+      }
+      return {
+        message: errorMessage ?? "Terminal error",
+        isError: true,
+        action: { label: "Restart", onClick: restart },
+      };
+    }
+    if (status === "ended") {
+      return {
+        message: "Session ended",
+        isError: false,
+        action: { label: "Restart", onClick: restart },
+      };
+    }
+    if (core === null) {
+      return { message: "Loading terminal core…", isError: false, action: null };
+    }
+    if (status === "connecting") {
+      // Without this a pane whose handshake never completes is
+      // indistinguishable from a working one that simply has no output yet.
+      return { message: "Connecting…", isError: false, action: null };
+    }
+    return null;
+  })();
+
+  // An overlay with a button must take clicks; one without must not steal them
+  // from the terminal it is covering.
+  const overlayClassName =
+    overlay !== null && overlay.action !== null
+      ? styles.overlay
+      : `${styles.overlay} ${styles.passive}`;
 
   return (
     <section role="group" aria-label={label} className={paneClassName}>
@@ -73,35 +142,16 @@ export function TerminalPane({ pane, token, className }: TerminalPaneProps): JSX
         />
       )}
 
-      {coreError !== null && (
-        <div className={styles.overlay}>
-          <p className={`${styles.message} ${styles.error}`}>
-            Failed to load terminal core: {coreError}
+      {overlay !== null && (
+        <div className={overlayClassName}>
+          <p className={overlay.isError ? `${styles.message} ${styles.error}` : styles.message}>
+            {overlay.message}
           </p>
-        </div>
-      )}
-
-      {coreError === null && core === null && (
-        <div className={styles.overlay}>
-          <p className={styles.message}>Loading terminal core…</p>
-        </div>
-      )}
-
-      {status === "error" && (
-        <div className={styles.overlay}>
-          <p className={`${styles.message} ${styles.error}`}>{errorMessage}</p>
-          <button type="button" className={styles.restart} onClick={restart}>
-            Restart
-          </button>
-        </div>
-      )}
-
-      {status === "ended" && (
-        <div className={styles.overlay}>
-          <p className={styles.message}>Session ended</p>
-          <button type="button" className={styles.restart} onClick={restart}>
-            Restart
-          </button>
+          {overlay.action !== null && (
+            <button type="button" className={styles.restart} onClick={overlay.action.onClick}>
+              {overlay.action.label}
+            </button>
+          )}
         </div>
       )}
     </section>

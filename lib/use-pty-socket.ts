@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { parseServerMessage, serializeMessage } from "@/shared/protocol";
+import { parseServerMessage, serializeMessage, type ErrorCode } from "@/shared/protocol";
 
 export const RESIZE_THROTTLE_MS = 50;
 
@@ -16,6 +16,7 @@ export interface UsePtySocketOptions {
 export interface UsePtySocket {
   status: PaneStatus;
   errorMessage: string | null;
+  errorCode: ErrorCode | null;
   connect: (cols: number, rows: number) => void;
   sendInput: (data: string) => void;
   sendResize: (cols: number, rows: number) => void;
@@ -30,6 +31,7 @@ function socketUrl(): string {
 export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePtySocket {
   const [status, setStatus] = useState<PaneStatus>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<ErrorCode | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const sizeRef = useRef({ cols: 80, rows: 24 });
@@ -66,6 +68,7 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       readyRef.current = false;
       pendingInputRef.current = [];
       setErrorMessage(null);
+      setErrorCode(null);
       setStatus("connecting");
 
       const ws = new WebSocket(socketUrl());
@@ -73,7 +76,21 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       socketRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(serializeMessage({ type: "hello", token, pane, cols, rows }));
+        // Read the size at handshake time, not the values captured when
+        // `connect()` was called: a resize landing during the (async) open
+        // updates `sizeRef` but is dropped by `sendResize` while the socket
+        // is not yet OPEN, so stale dimensions here would size tmux wrong
+        // until the next resize.
+        const size = sizeRef.current;
+        ws.send(
+          serializeMessage({
+            type: "hello",
+            token,
+            pane,
+            cols: size.cols,
+            rows: size.rows,
+          }),
+        );
       };
 
       ws.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
@@ -92,6 +109,7 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
           }
           erroredRef.current = true;
           setErrorMessage(msg.message);
+          setErrorCode(msg.code ?? null);
           setStatus("error");
           return;
         }
@@ -147,5 +165,5 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
     };
   }, []);
 
-  return { status, errorMessage, connect, sendInput, sendResize, restart };
+  return { status, errorMessage, errorCode, connect, sendInput, sendResize, restart };
 }

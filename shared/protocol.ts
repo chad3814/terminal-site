@@ -23,9 +23,26 @@ export interface ReadyMessage {
   type: "ready";
 }
 
+/**
+ * Machine-readable discriminator for error frames the client must react to
+ * differently. `message` stays human-readable and unstable; anything the UI
+ * branches on belongs here so the client never string-matches prose.
+ *
+ * - `unauthorized` — the boot token did not match. In practice this means the
+ *   server restarted since the page was rendered, so reconnecting with the
+ *   same token can never succeed and the page must be reloaded.
+ *
+ * `ERROR_CODES` is the single source of truth: the union is derived from it,
+ * so adding a code cannot leave the runtime validator behind.
+ */
+const ERROR_CODES = ["unauthorized"] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
+
 export interface ErrorMessage {
   type: "error";
   message: string;
+  code?: ErrorCode;
 }
 
 export type ClientMessage = HelloMessage | ResizeMessage;
@@ -42,6 +59,11 @@ function isDimension(value: JsonValue | undefined): value is number {
     value >= MIN_DIMENSION &&
     value <= MAX_DIMENSION
   );
+}
+
+function isErrorCode(value: JsonValue | undefined): value is ErrorCode {
+  const codes: readonly string[] = ERROR_CODES;
+  return typeof value === "string" && codes.includes(value);
 }
 
 function isPaneIndex(value: JsonValue | undefined): value is number {
@@ -92,7 +114,12 @@ export function parseServerMessage(raw: string): ServerMessage | null {
 
   if (obj.type === "error") {
     if (typeof obj.message !== "string") return null;
-    return { type: "error", message: obj.message };
+    // `code` is optional, but an unrecognised one is a shape this build does
+    // not understand — reject rather than silently degrade to a codeless
+    // error, which is exactly the ambiguity the field exists to remove.
+    if (obj.code === undefined) return { type: "error", message: obj.message };
+    if (!isErrorCode(obj.code)) return null;
+    return { type: "error", message: obj.message, code: obj.code };
   }
 
   return null;

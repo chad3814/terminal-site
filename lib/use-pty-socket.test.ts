@@ -55,6 +55,37 @@ describe("usePtySocket", () => {
     );
     expect(result.current.status).toBe("error");
     expect(result.current.errorMessage).toBe("tmux not found on PATH");
+    expect(result.current.errorCode).toBeNull();
+  });
+
+  it("surfaces the error code when the server sends one", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+    act(() =>
+      MockWebSocket.last().receive(
+        serializeMessage({ type: "error", message: "unauthorized", code: "unauthorized" }),
+      ),
+    );
+    expect(result.current.errorCode).toBe("unauthorized");
+
+    act(() => result.current.restart());
+    expect(result.current.errorCode).toBeNull();
+  });
+
+  it("sends the size current at handshake time, not at connect time", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+
+    // A divider drag (or a font/layout settle) between connect() and the
+    // socket actually opening. `sendResize` cannot deliver this — the socket
+    // is still CONNECTING — so the hello is the only chance to get it right.
+    act(() => result.current.sendResize(120, 40));
+    act(() => MockWebSocket.last().open());
+
+    expect(MockWebSocket.textFrames(MockWebSocket.last())[0]).toBe(
+      serializeMessage({ type: "hello", token: "tok", pane: 2, cols: 120, rows: 40 }),
+    );
   });
 
   it("writes binary frames into the terminal", () => {

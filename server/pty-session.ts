@@ -1,4 +1,4 @@
-import { parseClientMessage, serializeMessage } from "@/shared/protocol";
+import { parseClientMessage, serializeMessage, type ErrorCode } from "@/shared/protocol";
 import { isTokenValid } from "./auth";
 import { tmuxArgs } from "./tmux";
 
@@ -12,7 +12,13 @@ export interface SessionSocket {
 }
 
 export interface PtyHandle {
-  onData(cb: (data: string) => void): void;
+  // Raw bytes, not a decoded string: the pty is opened with `encoding: null`,
+  // because node-pty's 'utf8' default replaces every invalid byte with U+FFFD
+  // before we ever see it and re-encoding cannot recover the original. This
+  // module therefore forwards whatever it is handed, unmodified. Note that a
+  // pane is still lossy for non-UTF-8 output end to end — tmux re-encodes it
+  // upstream of here (see the spec's Transport section).
+  onData(cb: (data: Buffer) => void): void;
   onExit(cb: () => void): void;
   write(data: string): void;
   resize(cols: number, rows: number): void;
@@ -55,10 +61,10 @@ export function attachPtySession(deps: PtySessionDeps): void {
     }
   }, helloTimeoutMs);
 
-  function fail(message: string): void {
+  function fail(message: string, code?: ErrorCode): void {
     settled = true;
     clearTimeout(timer);
-    socket.send(serializeMessage({ type: "error", message }));
+    socket.send(serializeMessage({ type: "error", message, code }));
     socket.close();
   }
 
@@ -71,18 +77,29 @@ export function attachPtySession(deps: PtySessionDeps): void {
     settled = true;
     clearTimeout(timer);
 
-    const handle = spawn({
-      file: tmuxPath,
-      args: tmuxArgs(pane),
-      cols,
-      rows,
-      cwd,
-      env,
-    });
+    // node-pty throws synchronously at fork time (EAGAIN/EMFILE under process
+    // pressure, "posix_spawnp failed", a native ABI mismatch). Unguarded, that
+    // throw escapes this socket's message handler; `settled` is already true
+    // and the hello watchdog already cleared, so nothing else would ever tell
+    // the pane what happened and it would sit at "connecting" forever.
+    let handle: PtyHandle;
+    try {
+      handle = spawn({
+        file: tmuxPath,
+        args: tmuxArgs(pane),
+        cols,
+        rows,
+        cwd,
+        env,
+      });
+    } catch (error: unknown) {
+      fail(`failed to start shell: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
 
     handle.onData((data) => {
       if (tornDown) return;
-      socket.send(Buffer.from(data, "utf8"));
+      socket.send(data);
     });
 
     handle.onExit(() => {
@@ -109,7 +126,7 @@ export function attachPtySession(deps: PtySessionDeps): void {
     if (msg.type === "hello") {
       if (settled) return;
       if (!isTokenValid(msg.token, expectedToken)) {
-        fail("unauthorized");
+        fail("unauthorized", "unauthorized");
         return;
       }
       start(msg.pane, msg.cols, msg.rows);

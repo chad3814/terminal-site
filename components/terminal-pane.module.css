@@ -23,6 +23,12 @@
   text-align: center;
 }
 
+/* An overlay with no control is purely informational, so it must not swallow
+   clicks aimed at the terminal underneath it. */
+.passive {
+  pointer-events: none;
+}
+
 .message {
   color: #9a9a9a;
   margin: 0;

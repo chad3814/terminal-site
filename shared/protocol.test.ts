@@ -37,6 +37,36 @@ describe("serializeMessage", () => {
       parseServerMessage(serializeMessage({ type: "error", message: "nope" })),
     ).toEqual({ type: "error", message: "nope" });
   });
+
+  it("round-trips an error code", () => {
+    expect(
+      parseServerMessage(
+        serializeMessage({ type: "error", message: "unauthorized", code: "unauthorized" }),
+      ),
+    ).toEqual({ type: "error", message: "unauthorized", code: "unauthorized" });
+  });
+
+  it("omits an absent code rather than serializing null", () => {
+    expect(serializeMessage({ type: "error", message: "nope", code: undefined })).toBe(
+      '{"type":"error","message":"nope"}',
+    );
+  });
+});
+
+describe("parseServerMessage", () => {
+  it("rejects malformed and hostile input", () => {
+    expect(parseServerMessage("")).toBeNull();
+    expect(parseServerMessage("[]")).toBeNull();
+    expect(parseServerMessage('{"type":"nope"}')).toBeNull();
+    expect(parseServerMessage('{"type":"error"}')).toBeNull();
+    expect(parseServerMessage('{"type":"error","message":5}')).toBeNull();
+  });
+
+  it("rejects an unrecognised error code instead of dropping it", () => {
+    expect(parseServerMessage('{"type":"error","message":"x","code":"nope"}')).toBeNull();
+    expect(parseServerMessage('{"type":"error","message":"x","code":7}')).toBeNull();
+    expect(parseServerMessage('{"type":"error","message":"x","code":null}')).toBeNull();
+  });
 });
 
 describe("parseClientMessage", () => {

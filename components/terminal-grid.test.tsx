@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SPLIT_STORAGE_KEY, serializeSplit } from "@/lib/split-layout";
+import { PANE_COUNT } from "@/shared/protocol";
 
 vi.mock("./terminal-pane", () => ({
   TerminalPane: ({ pane }: { pane: number }) => (
@@ -19,11 +20,12 @@ afterEach(() => {
 });
 
 describe("TerminalGrid", () => {
-  it("renders four panes and two dividers", () => {
+  it("renders one pane per PANE_COUNT and two dividers", () => {
     render(<TerminalGrid token="tok" />);
-    for (let pane = 0; pane < 4; pane += 1) {
+    for (let pane = 0; pane < PANE_COUNT; pane += 1) {
       expect(screen.getByTestId(`pane-${pane}`)).toBeInTheDocument();
     }
+    expect(screen.queryByTestId(`pane-${PANE_COUNT}`)).not.toBeInTheDocument();
     expect(screen.getAllByRole("separator")).toHaveLength(2);
   });
 
@@ -58,7 +60,8 @@ describe("TerminalGrid", () => {
   it("ignores corrupt stored layout", () => {
     window.localStorage.setItem(SPLIT_STORAGE_KEY, "{{{");
     render(<TerminalGrid token="tok" />);
-    const [column] = screen.getAllByRole("separator");
+    const [column, row] = screen.getAllByRole("separator");
     expect(column).toHaveAttribute("aria-valuenow", "50");
+    expect(row).toHaveAttribute("aria-valuenow", "50");
   });
 });

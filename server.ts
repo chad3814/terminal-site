@@ -5,7 +5,7 @@ import next from "next";
 import * as pty from "node-pty";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { allowedOrigins, isOriginAllowed } from "./server/auth";
-import { attachPtySession, type SessionSocket } from "./server/pty-session";
+import { attachPtySession, type PtyHandle, type SessionSocket } from "./server/pty-session";
 import { findTmux, tmuxEnv } from "./server/tmux";
 import { bootToken } from "./server/token";
 
@@ -20,6 +20,32 @@ function toBuffer(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) return data;
   if (Array.isArray(data)) return Buffer.concat(data);
   return Buffer.from(data);
+}
+
+function toPtyHandle(term: pty.IPty): PtyHandle {
+  return {
+    onData(cb) {
+      // node-pty's typings declare `onData` as `IEvent<string>` regardless of
+      // the `encoding` option, but with `encoding: null` (set below) the
+      // underlying stream is never given an encoding and emits Buffer. Accept
+      // both so the difference is handled without an unchecked cast.
+      term.onData((data: string | Buffer) => {
+        cb(typeof data === "string" ? Buffer.from(data, "utf8") : data);
+      });
+    },
+    onExit(cb) {
+      term.onExit(() => cb());
+    },
+    write(data) {
+      term.write(data);
+    },
+    resize(cols, rows) {
+      term.resize(cols, rows);
+    },
+    kill() {
+      term.kill();
+    },
+  };
 }
 
 function toSessionSocket(ws: WebSocket): SessionSocket {
@@ -44,9 +70,13 @@ function toSessionSocket(ws: WebSocket): SessionSocket {
 async function main(): Promise<void> {
   await app.prepare();
 
+  // Resolved once at boot, so installing tmux while this process is running
+  // changes nothing — hence the explicit restart instruction.
   const tmuxPath = await findTmux(process.env.PATH);
   if (tmuxPath === null) {
-    console.warn("tmux not found on PATH — panes will report an error until it is installed");
+    console.warn(
+      "tmux not found on PATH — every pane will report an error. Install tmux, then restart this server.",
+    );
   }
 
   const origins = allowedOrigins(port);
@@ -63,6 +93,12 @@ async function main(): Promise<void> {
   // local client cannot send an oversized frame (e.g. a bogus token or paste).
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
+  // `WebSocketServer` is an EventEmitter: an 'error' it emits with no listener
+  // is rethrown and takes the process — and its four PTYs — down.
+  wss.on("error", (error: Error) => {
+    console.error("terminal websocket server error:", error);
+  });
+
   server.on("upgrade", (req, socket, head) => {
     const { pathname } = parse(req.url ?? "/", true);
 
@@ -72,24 +108,44 @@ async function main(): Promise<void> {
     }
 
     if (!isOriginAllowed(req.headers.origin, origins)) {
+      // Node's 'upgrade' contract hands over the raw socket, errors included.
+      // A peer that resets the connection mid-rejection would otherwise emit
+      // an unhandled 'error' and throw out of the event loop.
+      socket.on("error", () => {});
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
       return;
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
+      // `ws` emits 'error' on the WebSocket itself for receiver faults —
+      // notably a `maxPayload` violation, which an ordinary >1 MiB paste
+      // reaches with no hostile intent. Without a listener the EventEmitter
+      // rethrows and kills a process holding four PTYs.
+      ws.on("error", (error: Error) => {
+        console.error("terminal socket error:", error);
+        ws.close();
+      });
+
       attachPtySession({
         socket: toSessionSocket(ws),
         expectedToken: token,
         tmuxPath,
         spawn: (args) =>
-          pty.spawn(args.file, args.args, {
-            name: "xterm-256color",
-            cols: args.cols,
-            rows: args.rows,
-            cwd: args.cwd,
-            env: args.env,
-          }),
+          toPtyHandle(
+            pty.spawn(args.file, args.args, {
+              name: "xterm-256color",
+              cols: args.cols,
+              rows: args.rows,
+              cwd: args.cwd,
+              env: args.env,
+              // Hand back raw bytes. node-pty defaults to 'utf8', which
+              // decodes pty output to a string and replaces any invalid byte
+              // with U+FFFD before we ever see it, corrupting non-UTF-8
+              // program output on its way to the browser.
+              encoding: null,
+            }),
+          ),
         env,
         cwd,
       });
