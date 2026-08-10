@@ -1,0 +1,26 @@
+.grid {
+  display: grid;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.cell00 {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.cell01 {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.cell10 {
+  grid-column: 1;
+  grid-row: 3;
+}
+
+.cell11 {
+  grid-column: 3;
+  grid-row: 3;
+}
