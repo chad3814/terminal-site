@@ -1,0 +1,26 @@
+.divider {
+  background: var(--divider);
+  border: 0;
+  padding: 0;
+  touch-action: none;
+}
+
+.divider:hover,
+.divider:focus-visible {
+  background: var(--divider-active);
+  outline: none;
+}
+
+.vertical {
+  cursor: col-resize;
+  grid-column: 2;
+  grid-row: 1 / 4;
+  z-index: 2;
+}
+
+.horizontal {
+  cursor: row-resize;
+  grid-column: 1 / 4;
+  grid-row: 2;
+  z-index: 1;
+}
