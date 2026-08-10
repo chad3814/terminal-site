@@ -115,6 +115,15 @@ test("dragging the column divider reflows the panes", async ({ page }) => {
 test("the divider is keyboard operable", async ({ page }) => {
   await page.goto("/");
 
+  // Wait for hydration before pressing a key. Both separators are present in
+  // the server-rendered HTML, complete with tabindex="0" and
+  // aria-valuenow="50", so the locator matches and .focus() succeeds while
+  // React has not yet attached the keydown handler — the press would then do
+  // nothing and the value would still read 50. This was observed once on a
+  // cold first compile. role="textbox" is client-only (it renders only after
+  // the WASM core loads), so waiting on it proves the client is live.
+  await pane(page, 0).getByRole("textbox").waitFor();
+
   const divider = page.getByRole("separator", { name: "Resize rows" });
   await divider.focus();
   await divider.press("Shift+ArrowUp");
