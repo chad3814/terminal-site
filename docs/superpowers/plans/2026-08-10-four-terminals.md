@@ -544,7 +544,7 @@ Expected: FAIL — cannot resolve `./protocol`.
 - [ ] **Step 4: Write `shared/protocol.ts`**
 
 ```ts
-import { isJsonObject, parseJson, type JsonObject } from "./json";
+import { isJsonObject, parseJson, type JsonObject, type JsonValue } from "./json";
 
 export const PANE_COUNT = 4;
 
@@ -581,7 +581,7 @@ export function serializeMessage(msg: ClientMessage | ServerMessage): string {
   return JSON.stringify(msg);
 }
 
-function isDimension(value: JsonValueAt): value is number {
+function isDimension(value: JsonValue | undefined): value is number {
   return (
     typeof value === "number" &&
     Number.isInteger(value) &&
@@ -590,7 +590,7 @@ function isDimension(value: JsonValueAt): value is number {
   );
 }
 
-function isPaneIndex(value: JsonValueAt): value is number {
+function isPaneIndex(value: JsonValue | undefined): value is number {
   return (
     typeof value === "number" &&
     Number.isInteger(value) &&
@@ -598,8 +598,6 @@ function isPaneIndex(value: JsonValueAt): value is number {
     value < PANE_COUNT
   );
 }
-
-type JsonValueAt = JsonObject[string];
 
 function asObject(raw: string): JsonObject | null {
   const parsed = parseJson(raw);
