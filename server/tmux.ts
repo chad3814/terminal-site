@@ -1,4 +1,4 @@
-import { access, constants } from "node:fs/promises";
+import { access, constants, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
 export const TMUX_SESSION_PREFIX = "termsite-";
@@ -38,6 +38,8 @@ export async function findTmux(pathEnv: string | undefined): Promise<string | nu
     if (dir === "") continue;
     const candidate = join(dir, "tmux");
     try {
+      const stats = await stat(candidate);
+      if (!stats.isFile()) continue;
       await access(candidate, constants.X_OK);
       return candidate;
     } catch {
