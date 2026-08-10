@@ -18,3 +18,42 @@ body {
   color: var(--foreground);
   font-family: var(--font-mono), ui-monospace, monospace;
 }
+
+/*
+ * Terminal glyph font. @wterm/dom declares --term-font-family on `.wterm`
+ * itself, so an override on :root would lose — an element's own declaration
+ * beats an inherited one. `:root .wterm` also outranks the bare `.wterm` on
+ * specificity, so this wins regardless of which stylesheet the bundler emits
+ * last (globals.css is imported from the layout, @wterm/react/css from the
+ * pane, and their order is not guaranteed).
+ *
+ * Monofur is referenced as an installed system font rather than bundled as a
+ * webfont. That is deliberate: wterm measures the cell grid once at init with
+ * getBoundingClientRect and only re-measures on a resize, and it never waits
+ * on document.fonts. A webfont swapping in after that first measurement would
+ * leave the cols/rows already reported to tmux computed from the fallback
+ * font's metrics, desyncing the shell from what is drawn. A locally installed
+ * font is available synchronously, so no such window exists.
+ *
+ * Use the Mono variant: it constrains every Nerd Font icon to one cell, which
+ * the uniform cell grid requires. The plain and Propo variants do not.
+ */
+:root .wterm {
+  --term-font-family: "Monofur Nerd Font Mono", ui-monospace, monospace;
+  --term-font-size: 20px;
+
+  /*
+   * --term-row-height must be set by hand whenever --term-font-size changes;
+   * unlike the cell width, wterm cannot derive it. Its probe measures a
+   * `.term-row`, but `.term-row` has `height: var(--term-row-height)`, so the
+   * measurement only ever returns the value the variable already held — it is
+   * circular and can never discover that a larger font needs a taller row.
+   * (Cell width is measured off the inner span, whose width is not pinned, so
+   * that one does scale on its own.) Left at the 17px default, 20px glyphs
+   * render clipped and the rows/cols reported to tmux are wrong.
+   *
+   * 24px keeps wterm's own --term-line-height: 1.2 ratio (its 17px default is
+   * 14px x 1.21).
+   */
+  --term-row-height: 24px;
+}
