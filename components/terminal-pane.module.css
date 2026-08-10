@@ -1,0 +1,48 @@
+.pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal {
+  width: 100%;
+  height: 100%;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  background: rgb(10 10 10 / 85%);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.message {
+  color: #9a9a9a;
+  margin: 0;
+  padding: 0 1rem;
+}
+
+.error {
+  color: #ff6b6b;
+}
+
+.restart {
+  background: transparent;
+  border: 1px solid var(--divider-active);
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.9rem;
+}
+
+.restart:hover {
+  background: rgb(255 255 255 / 8%);
+}
