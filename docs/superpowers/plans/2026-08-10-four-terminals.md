@@ -927,14 +927,21 @@ describe("isTokenValid", () => {
       expect(result).toBe(false);
     });
 
-    it("calls timingSafeEqual for equal-length tokens", () => {
-      // This is enforced by requiring that auth.ts:
-      // 1. imports { timingSafeEqual } from "node:crypto"
-      // 2. calls timingSafeEqual(a, b) after the length check
-      // Both are verified in the implementation. A swapped-to-=== implementation
-      // would pass behavioral tests but uses non-timing-safe comparison.
-      expect(isTokenValid("test", "test")).toBe(true);
-      expect(isTokenValid("test", "fail")).toBe(false);
+    it("compares with crypto.timingSafeEqual, not a short-circuiting operator", async () => {
+      // Timing-safe comparison cannot be observed through return values alone:
+      // both crypto.timingSafeEqual and === return identical booleans for the
+      // same inputs. This test pins the security property by asserting on the
+      // implementation itself — the only honest way to verify *which function*
+      // is being called. This coupling is justified precisely because the
+      // security property lives in the call site, not in the result.
+      const { readFile } = await import("node:fs/promises");
+      const source = await readFile("server/auth.ts", "utf8");
+      expect(source).toMatch(
+        /import\s*\{[^}]*\btimingSafeEqual\b[^}]*\}\s*from\s*["']node:crypto["']/,
+      );
+      const body = source.slice(source.indexOf("export function isTokenValid"));
+      expect(body).toContain("timingSafeEqual(");
+      expect(body).not.toMatch(/provided\s*===\s*expected/);
     });
   });
 });
