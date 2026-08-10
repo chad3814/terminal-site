@@ -1918,6 +1918,16 @@ describe("SplitDivider", () => {
     fireEvent.pointerMove(separator, { pointerId: 1, clientX: 800, clientY: 250 });
     expect(onChange).toHaveBeenLastCalledWith(30);
   });
+
+  it("stops dragging when the pointer is cancelled", () => {
+    const { onChange, separator } = renderDivider("vertical", 50);
+
+    fireEvent.pointerDown(separator, { pointerId: 1, clientX: 500, clientY: 250 });
+    fireEvent.pointerCancel(separator, { pointerId: 1 });
+    fireEvent.pointerMove(separator, { pointerId: 1, clientX: 800, clientY: 250 });
+
+    expect(onChange).toHaveBeenLastCalledWith(50);
+  });
 });
 ```
 
@@ -2046,6 +2056,13 @@ export function SplitDivider({
     event.currentTarget.releasePointerCapture(event.pointerId);
   }, []);
 
+  const handlePointerCancel = useCallback(() => {
+    // No releasePointerCapture() here: per the Pointer Events spec, capture
+    // is implicitly released by the browser before pointercancel fires, so
+    // calling it again can throw NotFoundError. Clearing the ref is the fix.
+    dragging.current = false;
+  }, []);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? 5 : 1;
@@ -2086,6 +2103,7 @@ export function SplitDivider({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       onKeyDown={handleKeyDown}
     />
   );
@@ -2098,7 +2116,7 @@ export function SplitDivider({
 npx vitest run components/split-divider.test.tsx && npm run lint && npm run type-check
 ```
 
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 6: Commit** *(ask for approval first)*
 

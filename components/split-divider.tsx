@@ -79,6 +79,13 @@ export function SplitDivider({
     event.currentTarget.releasePointerCapture(event.pointerId);
   }, []);
 
+  const handlePointerCancel = useCallback(() => {
+    // No releasePointerCapture() here: per the Pointer Events spec, capture
+    // is implicitly released by the browser before pointercancel fires, so
+    // calling it again can throw NotFoundError. Clearing the ref is the fix.
+    dragging.current = false;
+  }, []);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? 5 : 1;
@@ -119,6 +126,7 @@ export function SplitDivider({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       onKeyDown={handleKeyDown}
     />
   );

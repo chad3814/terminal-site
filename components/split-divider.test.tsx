@@ -78,4 +78,14 @@ describe("SplitDivider", () => {
     fireEvent.pointerMove(separator, { pointerId: 1, clientX: 800, clientY: 250 });
     expect(onChange).toHaveBeenLastCalledWith(30);
   });
+
+  it("stops dragging when the pointer is cancelled", () => {
+    const { onChange, separator } = renderDivider("vertical", 50);
+
+    fireEvent.pointerDown(separator, { pointerId: 1, clientX: 500, clientY: 250 });
+    fireEvent.pointerCancel(separator, { pointerId: 1 });
+    fireEvent.pointerMove(separator, { pointerId: 1, clientX: 800, clientY: 250 });
+
+    expect(onChange).toHaveBeenLastCalledWith(50);
+  });
 });
