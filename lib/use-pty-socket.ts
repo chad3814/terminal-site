@@ -76,7 +76,11 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       };
 
       ws.onclose = () => {
-        if (socketRef.current === ws) socketRef.current = null;
+        // A superseded socket can still deliver a close event after
+        // `connect()` has already moved on to a new one; only the current
+        // socket's close may affect state.
+        if (socketRef.current !== ws) return;
+        socketRef.current = null;
         if (!erroredRef.current) setStatus("ended");
       };
     },

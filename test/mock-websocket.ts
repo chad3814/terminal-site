@@ -15,7 +15,6 @@ export class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string | ArrayBuffer>) => void) | null = null;
   onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
 
   constructor(url: string) {
     this.url = url;

@@ -2163,7 +2163,6 @@ export class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string | ArrayBuffer>) => void) | null = null;
   onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
@@ -2291,8 +2290,12 @@ describe("usePtySocket", () => {
     act(() => MockWebSocket.last().open());
     act(() => result.current.sendInput("ls\n"));
 
+    // `instanceof Uint8Array` is unusable here: under this project's jsdom
+    // test environment, TextEncoder's output is a Uint8Array from a
+    // different realm than the global Uint8Array, so `instanceof` silently
+    // returns false. ArrayBuffer.isView is realm-independent.
     const binary = MockWebSocket.last().sent.filter(
-      (frame): frame is Uint8Array => frame instanceof Uint8Array,
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
     );
     expect(new TextDecoder().decode(binary[0])).toBe("ls\n");
   });
@@ -2345,6 +2348,58 @@ describe("usePtySocket", () => {
     const socket = MockWebSocket.last();
     unmount();
     expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+  });
+
+  it("ignores a stale close from a superseded socket", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    const stale = MockWebSocket.last();
+    act(() => stale.open());
+
+    act(() => result.current.connect(80, 24));
+    const fresh = MockWebSocket.last();
+    act(() => fresh.open());
+    act(() => fresh.receive(serializeMessage({ type: "ready" })));
+    expect(result.current.status).toBe("ready");
+
+    // Simulate a late, out-of-order close event arriving from the socket
+    // that `connect()` already superseded. Real browsers deliver close
+    // events asynchronously, so this can arrive well after a new socket
+    // is open; it must not be able to knock a live pane back to "ended".
+    act(() => stale.onclose?.());
+
+    expect(result.current.status).toBe("ready");
+  });
+
+  it("keeps the error status when the socket later closes", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+    act(() =>
+      MockWebSocket.last().receive(serializeMessage({ type: "error", message: "boom" })),
+    );
+    act(() => MockWebSocket.last().close());
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.errorMessage).toBe("boom");
+  });
+
+  it("clears the errored flag on restart", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+    act(() =>
+      MockWebSocket.last().receive(serializeMessage({ type: "error", message: "boom" })),
+    );
+    expect(result.current.status).toBe("error");
+
+    act(() => result.current.restart());
+    act(() => MockWebSocket.last().open());
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+    expect(result.current.status).toBe("ready");
+
+    act(() => MockWebSocket.last().close());
+    expect(result.current.status).toBe("ended");
   });
 });
 ```
@@ -2438,7 +2493,11 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       };
 
       ws.onclose = () => {
-        if (socketRef.current === ws) socketRef.current = null;
+        // A superseded socket can still deliver a close event after
+        // `connect()` has already moved on to a new one; only the current
+        // socket's close may affect state.
+        if (socketRef.current !== ws) return;
+        socketRef.current = null;
         if (!erroredRef.current) setStatus("ended");
       };
     },
@@ -2489,7 +2548,7 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
 npx vitest run lib/use-pty-socket.test.ts && npm run lint && npm run type-check
 ```
 
-Expected: PASS, 10 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 6: Commit** *(ask for approval first)*
 
