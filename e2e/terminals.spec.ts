@@ -21,29 +21,33 @@ async function killSessions(): Promise<void> {
       // Session may not exist; nothing to clean up.
     }
   }
+  try {
+    // Safety net: the dev server can be killed (e.g. by Playwright tearing
+    // down its webServer) without running its socket-close handlers, which
+    // is what normally kills the local tmux client process attached to each
+    // session. `kill-session` above only reaches tmux's server and does not
+    // clean up an orphaned client left over from an earlier run.
+    await execFileAsync("pkill", ["-f", "tmux .*termsite-"]);
+  } catch {
+    // No matching processes; nothing to clean up.
+  }
 }
 
 function pane(page: Page, index: number) {
   return page.getByRole("group", { name: `Terminal ${index + 1}` });
 }
 
-// Keystrokes sent immediately after connecting can reach the server before
-// the tmux session is attached: `sendInput` only waits for the WebSocket to
-// be open, not for the "ready" control message, so a client typing as fast
-// as Playwright does can have its first bytes silently dropped server-side
-// (see server/pty-session.ts `start()`, where `pty` is still null). A human
-// never types quickly enough to hit this window. Retrying the whole
-// click-type-enter sequence until the marker lands works around the race
-// without weakening what is actually asserted — the exact marker text must
-// still appear.
-async function typeInPane(page: Page, index: number, text: string, marker: string): Promise<void> {
-  const target = pane(page, index);
-  await expect(async () => {
-    await target.click();
-    await page.keyboard.type(text);
-    await page.keyboard.press("Enter");
-    await expect(target).toContainText(marker, { timeout: 2_000 });
-  }).toPass({ timeout: 15_000 });
+async function typeInPane(page: Page, index: number, text: string): Promise<void> {
+  // Click the terminal's own input control, not the outer pane: the pane
+  // (`role="group"`) is visible the instant the page loads, well before the
+  // WASM core has been fetched and instantiated (~100-250ms locally), so a
+  // click on the pane itself can land while only the "Loading terminal
+  // core…" placeholder exists — focusing nothing. Targeting the input
+  // control lets Playwright's normal actionability wait handle that startup
+  // window instead of a manual delay or a retry of this whole function.
+  await pane(page, index).getByRole("textbox").click();
+  await page.keyboard.type(text);
+  await page.keyboard.press("Enter");
 }
 
 test.beforeAll(async () => {
@@ -62,7 +66,7 @@ test("four panes attach to four independent shells", async ({ page }) => {
     await expect(pane(page, index)).toBeVisible();
   }
 
-  await typeInPane(page, 1, "echo ISOLATION_MARKER", "ISOLATION_MARKER");
+  await typeInPane(page, 1, "echo ISOLATION_MARKER");
 
   await expect(pane(page, 1)).toContainText("ISOLATION_MARKER");
   await expect(pane(page, 0)).not.toContainText("ISOLATION_MARKER");
@@ -104,7 +108,7 @@ test("the divider is keyboard operable", async ({ page }) => {
 test("shells survive a page reload", async ({ page }) => {
   await page.goto("/");
 
-  await typeInPane(page, 2, "echo PERSIST_MARKER", "PERSIST_MARKER");
+  await typeInPane(page, 2, "echo PERSIST_MARKER");
   await expect(pane(page, 2)).toContainText("PERSIST_MARKER");
 
   await page.reload();

@@ -1556,7 +1556,10 @@ async function main(): Promise<void> {
     handle(req, res, parse(req.url ?? "/", true));
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // maxPayload caps an inbound WebSocket frame at 1 MiB, which is generous
+  // for terminal input/paste but replaces ws's 100 MiB default so a hostile
+  // local client cannot send an oversized frame (e.g. a bogus token or paste).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   server.on("upgrade", (req, socket, head) => {
     const { pathname } = parse(req.url ?? "/", true);
@@ -1591,6 +1594,48 @@ async function main(): Promise<void> {
     });
   });
 
+  // Closing each client fires the same "close" handler `attachPtySession`
+  // already wires up per socket via `toSessionSocket`, which kills that
+  // session's pty handle (SIGHUP to the local tmux client — detaches, does
+  // not destroy the session; see server/pty-session.ts). Without this, a
+  // signal that kills the process directly (e.g. Playwright tearing down
+  // its webServer) never runs that handler, leaving an orphaned
+  // `tmux new-session` client reparented to pid 1 for every open pane.
+  const SHUTDOWN_DRAIN_MS = 1_000;
+  let shuttingDown = false;
+
+  function shutdown(signal: NodeJS.Signals): void {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const clients = [...wss.clients];
+    console.log(`> received ${signal}, closing ${clients.length} terminal socket(s)`);
+
+    // Wait for each socket's own "close" event rather than a blind delay:
+    // that event is what runs pty.kill() (SIGHUP to the tmux client), so
+    // this exits as soon as every close handler has actually fired instead
+    // of always paying the full drain time. The timeout is only a fallback
+    // for a socket that never closes cleanly.
+    const allClosed = Promise.all(
+      clients.map(
+        (client) =>
+          new Promise<void>((resolve) => {
+            if (client.readyState === WebSocket.CLOSED) {
+              resolve();
+              return;
+            }
+            client.once("close", () => resolve());
+            client.close();
+          }),
+      ),
+    );
+    const drainTimeout = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS));
+
+    Promise.race([allClosed, drainTimeout]).then(() => process.exit(0));
+  }
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
   server.listen(port, hostname, () => {
     console.log(`> terminal-site ready on http://${hostname}:${port}`);
   });
@@ -1603,6 +1648,19 @@ main().catch((error: unknown) => {
 ```
 
 Note `main().catch((error: unknown) => ...)` — a catch parameter is the one place `unknown` is unavoidable, and it is safer than `any` there.
+
+**Post-Task-13 addendum (SIGINT/SIGTERM shutdown handling).** Task 13's Playwright suite
+exposed a leak this original version didn't have a test to catch: Playwright's `webServer`
+teardown sends an immediate `SIGKILL` to the whole process group by default (see
+`playwright.config.ts`'s `gracefulShutdown` addendum below). `SIGKILL` cannot be caught by
+any handler, so `attachPtySession`'s per-socket `onClose` handler — the only thing that ever
+calls `pty.kill()` to detach a session's local tmux client — never ran, leaving one orphaned
+`tmux new-session` client per still-open pane, reparented to pid 1. The `shutdown()` function
+above closes every open `WebSocketServer` client on `SIGINT`/`SIGTERM`, which reuses that same
+existing `onClose` → `pty.kill()` path rather than adding new lifecycle state, and waits (up to
+a 1s fallback) for each socket to actually finish closing before exiting. It is idempotent
+(`shuttingDown` guards against a second signal re-entering it while the first is still
+draining).
 
 - [ ] **Step 2: Verify the server boots and rejects a bad origin**
 
@@ -2284,10 +2342,11 @@ describe("usePtySocket", () => {
     expect(new TextDecoder().decode(write.mock.calls[0]?.[0])).toBe("hi");
   });
 
-  it("sends input as binary", () => {
+  it("sends input as binary once the session is ready", () => {
     const { result } = setup();
     act(() => result.current.connect(80, 24));
     act(() => MockWebSocket.last().open());
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
     act(() => result.current.sendInput("ls\n"));
 
     // `instanceof Uint8Array` is unusable here: under this project's jsdom
@@ -2298,6 +2357,48 @@ describe("usePtySocket", () => {
       (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
     );
     expect(new TextDecoder().decode(binary[0])).toBe("ls\n");
+  });
+
+  it("buffers input sent before ready and flushes it in order once ready arrives", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+
+    // The socket is open but the server has not yet spawned the pty — this
+    // is exactly the window where a fire-and-forget send would be dropped
+    // (see server/pty-session.ts `start()`, where `pty` is still null).
+    act(() => {
+      result.current.sendInput("ec");
+      result.current.sendInput("ho hi\n");
+    });
+
+    const beforeReady = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(beforeReady).toHaveLength(0);
+
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+
+    const binary = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(binary.map((frame) => new TextDecoder().decode(frame))).toEqual(["ec", "ho hi\n"]);
+  });
+
+  it("discards queued input on restart instead of replaying it into the new session", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+    act(() => result.current.sendInput("stale input"));
+
+    act(() => result.current.restart());
+    act(() => MockWebSocket.last().open());
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+
+    const binary = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(binary).toHaveLength(0);
   });
 
   it("throttles resize to one trailing frame", () => {
@@ -2453,6 +2554,21 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const erroredRef = useRef(false);
 
+  // Mirrors `status === "ready"` in a ref so `sendInput`'s callback identity
+  // can stay stable (empty deps) without ever reading a stale closure value.
+  const readyRef = useRef(false);
+
+  // Input typed or pasted before the session reports "ready" is queued here
+  // instead of being sent (and silently lost) or dropped on the floor: the
+  // server does not assign its pty handle until "ready", so bytes written
+  // any earlier never reach the shell (see server/pty-session.ts `start()`).
+  // Gating `sendInput` on readiness instead of buffering would just turn
+  // that rare drop into a guaranteed one for anything typed while
+  // connecting. Flushed in order once "ready" arrives; cleared on every
+  // `connect()` so a `restart()` never replays input meant for a session
+  // that no longer exists.
+  const pendingInputRef = useRef<string[]>([]);
+
   // `write` changes identity every render; keep it in a ref so the socket
   // handlers do not need to be rebuilt.
   const writeRef = useRef(write);
@@ -2465,6 +2581,8 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       socketRef.current?.close();
       sizeRef.current = { cols, rows };
       erroredRef.current = false;
+      readyRef.current = false;
+      pendingInputRef.current = [];
       setErrorMessage(null);
       setStatus("connecting");
 
@@ -2481,6 +2599,12 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
           const msg = parseServerMessage(event.data);
           if (msg === null) return;
           if (msg.type === "ready") {
+            readyRef.current = true;
+            const queued = pendingInputRef.current;
+            pendingInputRef.current = [];
+            for (const chunk of queued) {
+              ws.send(new TextEncoder().encode(chunk));
+            }
             setStatus("ready");
             return;
           }
@@ -2511,7 +2635,10 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
 
   const sendInput = useCallback((data: string) => {
     const ws = socketRef.current;
-    if (ws === null || ws.readyState !== WebSocket.OPEN) return;
+    if (ws === null || ws.readyState !== WebSocket.OPEN || !readyRef.current) {
+      pendingInputRef.current.push(data);
+      return;
+    }
     ws.send(new TextEncoder().encode(data));
   }, []);
 
@@ -2542,13 +2669,27 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
 }
 ```
 
+**Post-Task-13 addendum (input buffering).** Task 13's Playwright suite exposed a real race in
+this original version: `sendInput` fired as soon as the socket's `readyState` was `OPEN`,
+without waiting for the server's `"ready"` control message. Server-side, the pty handle is not
+assigned until `"ready"` is sent (`server/pty-session.ts` `start()`), so any input arriving
+before then was silently dropped. A human cannot type fast enough to hit this window, but a
+paste — or Playwright's zero-delay `keyboard.type()` — can, and the surviving remainder then
+executes as a garbled command in a live shell. `readyRef` and `pendingInputRef` above (plus the
+`ready`-message flush and the `connect()` reset) fix this by buffering rather than gating:
+gating `sendInput` on `status === "ready"` would have turned a rare race into a guaranteed drop
+for anything typed while connecting. (Two tests were added to cover it — see the test file
+above — bringing this file to 15 tests; one existing test was renamed and given an explicit
+`"ready"` step since sending immediately on open, without waiting for readiness, is exactly
+the behavior being fixed.)
+
 - [ ] **Step 5: Run the test to verify it passes**
 
 ```bash
 npx vitest run lib/use-pty-socket.test.ts && npm run lint && npm run type-check
 ```
 
-Expected: PASS, 13 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 6: Commit** *(ask for approval first)*
 
@@ -3202,6 +3343,28 @@ export default defineConfig({
 `workers: 1` and `fullyParallel: false` are deliberate — the four tmux sessions are
 shared global state, so parallel specs would fight over them.
 
+**Post-review addendum (`gracefulShutdown`).** Running this suite exposed that Playwright's
+`webServer` teardown sends an immediate `SIGKILL` to the whole process group by default —
+uncatchable by any handler in `server.ts`, and even a catchable signal sent to the *group*
+would not reach node-pty's spawned tmux client, which runs in its own detached session. The
+config actually shipped adds:
+
+```ts
+  webServer: {
+    command: "npm run dev",
+    url: BASE_URL,
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+    gracefulShutdown: { signal: "SIGTERM", timeout: 5_000 },
+  },
+```
+
+`gracefulShutdown` makes Playwright send `SIGTERM` first (still to the process group, but this
+one *is* catchable by the group's leader — our `tsx server.ts` process), falling back to
+`SIGKILL` only if the process has not exited within the timeout. That gives `server.ts`'s
+`SIGTERM` handler (see Task 6's addendum) a chance to close every open pane's socket — which
+runs the existing `onClose` → `pty.kill()` path — before anything is force-killed.
+
 - [ ] **Step 2: Write `e2e/terminals.spec.ts`**
 
 ```ts
@@ -3228,6 +3391,16 @@ async function killSessions(): Promise<void> {
       // Session may not exist; nothing to clean up.
     }
   }
+  try {
+    // Safety net: the dev server can be killed (e.g. by Playwright tearing
+    // down its webServer) without running its socket-close handlers, which
+    // is what normally kills the local tmux client process attached to each
+    // session. `kill-session` above only reaches tmux's server and does not
+    // clean up an orphaned client left over from an earlier run.
+    await execFileAsync("pkill", ["-f", "tmux .*termsite-"]);
+  } catch {
+    // No matching processes; nothing to clean up.
+  }
 }
 
 function pane(page: Page, index: number) {
@@ -3235,7 +3408,14 @@ function pane(page: Page, index: number) {
 }
 
 async function typeInPane(page: Page, index: number, text: string): Promise<void> {
-  await pane(page, index).click();
+  // Click the terminal's own input control, not the outer pane: the pane
+  // (`role="group"`) is visible the instant the page loads, well before the
+  // WASM core has been fetched and instantiated (~100-250ms locally), so a
+  // click on the pane itself can land while only the "Loading terminal
+  // core…" placeholder exists — focusing nothing. Targeting the input
+  // control lets Playwright's normal actionability wait handle that startup
+  // window instead of a manual delay or a retry of this whole function.
+  await pane(page, index).getByRole("textbox").click();
   await page.keyboard.type(text);
   await page.keyboard.press("Enter");
 }
@@ -3317,6 +3497,20 @@ npm run test:e2e
 Expected: 4 passing tests. If the reload test fails, check `tmux ls` — the session
 should still exist, which localises the fault to the client reattach path rather
 than to tmux.
+
+**Post-review findings, both fixed on this branch and covered above:**
+- A real dropped-input race (`lib/use-pty-socket.ts`'s `sendInput` firing before the server's
+  `"ready"` message assigns its pty handle) was found by running this suite with
+  Playwright's zero-delay `keyboard.type()`. It was fixed at the source with input buffering
+  (Task 9's addendum) rather than papered over with a retry in `typeInPane` — a retry would
+  have masked a reintroduced version of the same bug instead of failing the suite.
+- Running the suite also leaked one orphaned `tmux new-session` client per open pane on every
+  invocation, because Playwright's default `webServer` teardown (`SIGKILL` to the process
+  group) never gives `server.ts` a chance to run its socket-close cleanup. Fixed with
+  `gracefulShutdown` (this task's addendum above) plus a `SIGINT`/`SIGTERM` handler in
+  `server.ts` (Task 6's addendum). `killSessions()`'s `pkill` safety net above is a second
+  line of defense for whatever a signal-based fix cannot reach (e.g. a suite run interrupted
+  hard enough that even the graceful path does not get to run).
 
 - [ ] **Step 4: Rewrite `README.md`**
 

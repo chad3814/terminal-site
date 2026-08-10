@@ -36,6 +36,21 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const erroredRef = useRef(false);
 
+  // Mirrors `status === "ready"` in a ref so `sendInput`'s callback identity
+  // can stay stable (empty deps) without ever reading a stale closure value.
+  const readyRef = useRef(false);
+
+  // Input typed or pasted before the session reports "ready" is queued here
+  // instead of being sent (and silently lost) or dropped on the floor: the
+  // server does not assign its pty handle until "ready", so bytes written
+  // any earlier never reach the shell (see server/pty-session.ts `start()`).
+  // Gating `sendInput` on readiness instead of buffering would just turn
+  // that rare drop into a guaranteed one for anything typed while
+  // connecting. Flushed in order once "ready" arrives; cleared on every
+  // `connect()` so a `restart()` never replays input meant for a session
+  // that no longer exists.
+  const pendingInputRef = useRef<string[]>([]);
+
   // `write` changes identity every render; keep it in a ref so the socket
   // handlers do not need to be rebuilt.
   const writeRef = useRef(write);
@@ -48,6 +63,8 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       socketRef.current?.close();
       sizeRef.current = { cols, rows };
       erroredRef.current = false;
+      readyRef.current = false;
+      pendingInputRef.current = [];
       setErrorMessage(null);
       setStatus("connecting");
 
@@ -64,6 +81,12 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
           const msg = parseServerMessage(event.data);
           if (msg === null) return;
           if (msg.type === "ready") {
+            readyRef.current = true;
+            const queued = pendingInputRef.current;
+            pendingInputRef.current = [];
+            for (const chunk of queued) {
+              ws.send(new TextEncoder().encode(chunk));
+            }
             setStatus("ready");
             return;
           }
@@ -94,7 +117,10 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
 
   const sendInput = useCallback((data: string) => {
     const ws = socketRef.current;
-    if (ws === null || ws.readyState !== WebSocket.OPEN) return;
+    if (ws === null || ws.readyState !== WebSocket.OPEN || !readyRef.current) {
+      pendingInputRef.current.push(data);
+      return;
+    }
     ws.send(new TextEncoder().encode(data));
   }, []);
 

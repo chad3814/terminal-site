@@ -68,10 +68,11 @@ describe("usePtySocket", () => {
     expect(new TextDecoder().decode(write.mock.calls[0]?.[0])).toBe("hi");
   });
 
-  it("sends input as binary", () => {
+  it("sends input as binary once the session is ready", () => {
     const { result } = setup();
     act(() => result.current.connect(80, 24));
     act(() => MockWebSocket.last().open());
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
     act(() => result.current.sendInput("ls\n"));
 
     // `instanceof Uint8Array` is unusable here: under this project's jsdom
@@ -82,6 +83,48 @@ describe("usePtySocket", () => {
       (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
     );
     expect(new TextDecoder().decode(binary[0])).toBe("ls\n");
+  });
+
+  it("buffers input sent before ready and flushes it in order once ready arrives", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+
+    // The socket is open but the server has not yet spawned the pty — this
+    // is exactly the window where a fire-and-forget send would be dropped
+    // (see server/pty-session.ts `start()`, where `pty` is still null).
+    act(() => {
+      result.current.sendInput("ec");
+      result.current.sendInput("ho hi\n");
+    });
+
+    const beforeReady = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(beforeReady).toHaveLength(0);
+
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+
+    const binary = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(binary.map((frame) => new TextDecoder().decode(frame))).toEqual(["ec", "ho hi\n"]);
+  });
+
+  it("discards queued input on restart instead of replaying it into the new session", () => {
+    const { result } = setup();
+    act(() => result.current.connect(80, 24));
+    act(() => MockWebSocket.last().open());
+    act(() => result.current.sendInput("stale input"));
+
+    act(() => result.current.restart());
+    act(() => MockWebSocket.last().open());
+    act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+
+    const binary = MockWebSocket.last().sent.filter(
+      (frame): frame is Uint8Array => ArrayBuffer.isView(frame),
+    );
+    expect(binary).toHaveLength(0);
   });
 
   it("throttles resize to one trailing frame", () => {

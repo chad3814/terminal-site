@@ -96,6 +96,48 @@ async function main(): Promise<void> {
     });
   });
 
+  // Closing each client fires the same "close" handler `attachPtySession`
+  // already wires up per socket via `toSessionSocket`, which kills that
+  // session's pty handle (SIGHUP to the local tmux client — detaches, does
+  // not destroy the session; see server/pty-session.ts). Without this, a
+  // signal that kills the process directly (e.g. Playwright tearing down
+  // its webServer) never runs that handler, leaving an orphaned
+  // `tmux new-session` client reparented to pid 1 for every open pane.
+  const SHUTDOWN_DRAIN_MS = 1_000;
+  let shuttingDown = false;
+
+  function shutdown(signal: NodeJS.Signals): void {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const clients = [...wss.clients];
+    console.log(`> received ${signal}, closing ${clients.length} terminal socket(s)`);
+
+    // Wait for each socket's own "close" event rather than a blind delay:
+    // that event is what runs pty.kill() (SIGHUP to the tmux client), so
+    // this exits as soon as every close handler has actually fired instead
+    // of always paying the full drain time. The timeout is only a fallback
+    // for a socket that never closes cleanly.
+    const allClosed = Promise.all(
+      clients.map(
+        (client) =>
+          new Promise<void>((resolve) => {
+            if (client.readyState === WebSocket.CLOSED) {
+              resolve();
+              return;
+            }
+            client.once("close", () => resolve());
+            client.close();
+          }),
+      ),
+    );
+    const drainTimeout = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS));
+
+    Promise.race([allClosed, drainTimeout]).then(() => process.exit(0));
+  }
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
   server.listen(port, hostname, () => {
     console.log(`> terminal-site ready on http://${hostname}:${port}`);
   });
