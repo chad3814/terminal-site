@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeMessage } from "@/shared/protocol";
+import { tmuxArgs } from "./tmux";
 import {
   attachPtySession,
   type PtyHandle,
@@ -139,13 +140,12 @@ describe("attachPtySession", () => {
 
     expect(spawnArgs).toHaveLength(1);
     expect(spawnArgs[0]?.file).toBe("/usr/bin/tmux");
-    expect(spawnArgs[0]?.args).toEqual([
-      "new-session",
-      "-A",
-      "-D",
-      "-s",
-      "termsite-1",
-    ]);
+    // This module's job is to spawn tmuxArgs(pane) for the pane it was told
+    // about; the argv's contents are tmux.test.ts's contract. Comparing
+    // against tmuxArgs(1) still catches a wrong pane index, since
+    // tmuxArgs(1) and tmuxArgs(2) differ.
+    expect(spawnArgs[0]?.args).toEqual(tmuxArgs(1));
+    expect(spawnArgs[0]?.args).not.toEqual(tmuxArgs(2));
     expect(spawnArgs[0]?.cols).toBe(80);
     expect(spawnArgs[0]?.rows).toBe(24);
     expect(textFrames(socket)).toContain(serializeMessage({ type: "ready" }));

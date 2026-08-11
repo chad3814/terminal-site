@@ -61,6 +61,19 @@ async function renderPane() {
   });
 }
 
+/**
+ * Deliver a title the way the real server does — as an OSC 0 sequence inside a
+ * binary PTY frame — rather than by poking a callback. This exercises the
+ * scanner and the hook alongside the component, which matters because the
+ * terminal core never reports titles for us.
+ */
+function emitTitle(title: string): void {
+  const bytes = new TextEncoder().encode(`\x1b]0;${title}\x07`);
+  MockWebSocket.last().receive(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+  );
+}
+
 describe("TerminalPane", () => {
   it("loads a core, then connects and sends hello with the terminal's size", async () => {
     await renderPane();
@@ -146,5 +159,75 @@ describe("TerminalPane", () => {
   it("labels the pane for assistive technology", async () => {
     await renderPane();
     expect(screen.getByRole("group", { name: /terminal 2/i })).toBeInTheDocument();
+  });
+
+  describe("header", () => {
+    it("falls back to the pane label until a title arrives", async () => {
+      await renderPane();
+      expect(screen.getByText("Terminal 2")).toBeInTheDocument();
+    });
+
+    it("shows the title reported by the terminal, and follows later changes", async () => {
+      await renderPane();
+
+      act(() => emitTitle("zsh · cwalker"));
+      expect(await screen.findByText("zsh · cwalker")).toBeInTheDocument();
+      expect(screen.queryByText("Terminal 2")).not.toBeInTheDocument();
+
+      act(() => emitTitle("vim · terminal-site"));
+      expect(await screen.findByText("vim · terminal-site")).toBeInTheDocument();
+      expect(screen.queryByText("zsh · cwalker")).not.toBeInTheDocument();
+    });
+
+    it("keeps the pane's accessible name fixed while the title changes", async () => {
+      // The title churns with every cd and command. If it became the group's
+      // accessible name, the grid and the Playwright suite could no longer
+      // address a pane by identity.
+      await renderPane();
+      act(() => emitTitle("vim · terminal-site"));
+      await screen.findByText("vim · terminal-site");
+
+      expect(screen.getByRole("group", { name: "Terminal 2" })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: /vim/i })).not.toBeInTheDocument();
+    });
+
+    it("reports pane health as a named image, not colour alone", async () => {
+      await renderPane();
+      expect(screen.getByRole("img", { name: "connecting" })).toBeInTheDocument();
+
+      act(() => MockWebSocket.last().open());
+      act(() => MockWebSocket.last().receive(serializeMessage({ type: "ready" })));
+      expect(await screen.findByRole("img", { name: "connected" })).toBeInTheDocument();
+
+      act(() => MockWebSocket.last().close());
+      expect(await screen.findByRole("img", { name: "session ended" })).toBeInTheDocument();
+    });
+
+    it("falls back to the pane label if the shell clears the title", async () => {
+      await renderPane();
+      act(() => emitTitle("vim · terminal-site"));
+      await screen.findByText("vim · terminal-site");
+
+      // Some programs clear the title with `ESC ] 0 ; BEL`. The scanner
+      // faithfully reports "", which must not render as a blank header.
+      act(() => emitTitle(""));
+      expect(await screen.findByText("Terminal 2")).toBeInTheDocument();
+    });
+
+    // NOTE: jsdom does no layout, so this cannot verify that the header is
+    // visually unobscured — only that both exist in the tree. That the header
+    // sits outside the overlay's stacking context is asserted for real in the
+    // Playwright suite.
+    it("keeps the title in the tree alongside a session-ended overlay", async () => {
+      await renderPane();
+      act(() => emitTitle("vim · terminal-site"));
+      await screen.findByText("vim · terminal-site");
+
+      act(() => MockWebSocket.last().open());
+      act(() => MockWebSocket.last().close());
+
+      expect(await screen.findByText(/session ended/i)).toBeInTheDocument();
+      expect(screen.getByText("vim · terminal-site")).toBeInTheDocument();
+    });
   });
 });

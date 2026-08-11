@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseServerMessage, serializeMessage, type ErrorCode } from "@/shared/protocol";
+import { createTitleScanner, type TitleScanner } from "./osc-title";
 
 export const RESIZE_THROTTLE_MS = 50;
 
@@ -11,6 +12,13 @@ export interface UsePtySocketOptions {
   pane: number;
   token: string;
   write: (data: Uint8Array) => void;
+  /**
+   * Called when the shell reports a new terminal title. Sourced by scanning
+   * the PTY stream for OSC sequences rather than from the terminal core:
+   * `@wterm/ghostty` never reports titles, so `<Terminal onTitle>` is inert
+   * for us. See lib/osc-title.ts.
+   */
+  onTitle?: (title: string) => void;
 }
 
 export interface UsePtySocket {
@@ -28,7 +36,12 @@ function socketUrl(): string {
   return `${proto}//${window.location.host}/api/terminal`;
 }
 
-export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePtySocket {
+export function usePtySocket({
+  pane,
+  token,
+  write,
+  onTitle,
+}: UsePtySocketOptions): UsePtySocket {
   const [status, setStatus] = useState<PaneStatus>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<ErrorCode | null>(null);
@@ -60,6 +73,17 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
     writeRef.current = write;
   }, [write]);
 
+  const onTitleRef = useRef(onTitle);
+  useEffect(() => {
+    onTitleRef.current = onTitle;
+  }, [onTitle]);
+
+  // Stateful across chunks: an OSC sequence can straddle two frames.
+  const titleScannerRef = useRef<TitleScanner | null>(null);
+  if (titleScannerRef.current === null) {
+    titleScannerRef.current = createTitleScanner();
+  }
+
   const connect = useCallback(
     (cols: number, rows: number) => {
       socketRef.current?.close();
@@ -67,6 +91,9 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
       erroredRef.current = false;
       readyRef.current = false;
       pendingInputRef.current = [];
+      // A half-read sequence from the dead socket must not be completed by
+      // the first bytes of the new one.
+      titleScannerRef.current?.reset();
       setErrorMessage(null);
       setErrorCode(null);
       setStatus("connecting");
@@ -113,7 +140,12 @@ export function usePtySocket({ pane, token, write }: UsePtySocketOptions): UsePt
           setStatus("error");
           return;
         }
-        writeRef.current(new Uint8Array(event.data));
+        const bytes = new Uint8Array(event.data);
+        // Observe before writing: the scanner only reads, and the core ignores
+        // OSC sequences, so the terminal still receives the stream unchanged.
+        const nextTitle = titleScannerRef.current?.push(bytes) ?? null;
+        if (nextTitle !== null) onTitleRef.current?.(nextTitle);
+        writeRef.current(bytes);
       };
 
       ws.onclose = () => {

@@ -2,7 +2,14 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { findTmux, tmuxArgs, tmuxEnv, tmuxSessionName } from "./tmux";
+import {
+  TMUX_STATUS_INTERVAL_SECONDS,
+  TMUX_TITLE_FORMAT,
+  findTmux,
+  tmuxArgs,
+  tmuxEnv,
+  tmuxSessionName,
+} from "./tmux";
 
 const createdDirs: string[] = [];
 
@@ -14,14 +21,60 @@ describe("tmuxSessionName", () => {
 });
 
 describe("tmuxArgs", () => {
-  it("attaches-or-creates and detaches other clients", () => {
+  it("attaches-or-creates, detaches other clients, and enables title reporting", () => {
     expect(tmuxArgs(2)).toEqual([
       "new-session",
       "-A",
       "-D",
       "-s",
       "termsite-2",
+      ";",
+      "set-option",
+      "-t",
+      "termsite-2",
+      "set-titles",
+      "on",
+      ";",
+      "set-option",
+      "-t",
+      "termsite-2",
+      "set-titles-string",
+      TMUX_TITLE_FORMAT,
+      ";",
+      "set-option",
+      "-t",
+      "termsite-2",
+      "status-interval",
+      String(TMUX_STATUS_INTERVAL_SECONDS),
     ]);
+  });
+
+  it("scopes every set-option to our own session", () => {
+    // A bare `set-option set-titles on` would write the user's global tmux
+    // setting and change the behaviour of every session they have open. Every
+    // set-option here must carry `-t <our session>`.
+    const args = tmuxArgs(3);
+    const setOptionIndexes = args
+      .map((arg, i) => (arg === "set-option" ? i : -1))
+      .filter((i) => i !== -1);
+
+    expect(setOptionIndexes).toHaveLength(3);
+    for (const i of setOptionIndexes) {
+      expect(args[i + 1]).toBe("-t");
+      expect(args[i + 2]).toBe("termsite-3");
+    }
+  });
+
+  it("emits the title format tmux expands, not a literal string", () => {
+    expect(TMUX_TITLE_FORMAT).toContain("#{pane_current_command}");
+    expect(TMUX_TITLE_FORMAT).toContain("#{b:pane_current_path}");
+  });
+
+  it("drives the status redraw fast enough to catch short-lived commands", () => {
+    // tmux emits the title on its status redraw, not when the foreground
+    // command changes. Any interval longer than a typical command means most
+    // commands start and finish between ticks and never reach the header.
+    expect(TMUX_STATUS_INTERVAL_SECONDS).toBeLessThanOrEqual(1);
   });
 });
 

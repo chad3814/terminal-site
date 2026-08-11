@@ -30,7 +30,9 @@ Explicitly out of scope. Each is a reasonable follow-up, none is in this build:
 - Multiplexing all panes over one WebSocket.
 - Any auth model beyond localhost (no users, no sessions, no sandboxing).
 - A dynamic tmux-style split tree; the grid is fixed at four panes.
-- Per-pane header chrome, theme switcher, `Cmd+1..4` focus shortcuts.
+- Theme switcher, `Cmd+1..4` focus shortcuts.
+- ~~Per-pane header chrome~~ — reversed. Each pane now carries a header showing
+  a live title and a health dot; see "Pane headers" below.
 - Scrollback UI beyond what wterm and tmux copy-mode already provide.
 
 ## Threat model
@@ -147,6 +149,55 @@ removes the one lossy hop we own, and is a prerequisite for any future raw
 
 Inbound frames are capped at 1 MiB (`maxPayload`), well above any realistic paste and
 far below `ws`'s 100 MiB default.
+
+### Pane headers
+
+Each pane carries a thin header: a health dot plus a live title of the form
+`command · directory` (e.g. `vim · terminal-site`). It costs one row of
+terminal height per pane.
+
+The pane's accessible name stays `Terminal N` and does **not** follow the
+title. The title changes with every `cd` and every command, and both the grid
+and the Playwright suite address panes by that name; an identity that moves is
+not addressable. The title is rendered as visible text instead, and the dot is
+an `img` with an accessible name so its meaning is not carried by colour alone.
+The header sits outside the overlay's stacking context, so a dead pane still
+shows what it was.
+
+#### Where the title comes from
+
+Not from the terminal core. `@wterm/ghostty` implements `getTitle()` as
+`return null` unconditionally — "a full stream handler would be needed for
+title support" — so `<Terminal onTitle>` can never fire while that core is in
+use. The built-in Zig core does implement it, but switching cores would give up
+the VT compliance the ghostty dependency exists for.
+
+Instead `lib/osc-title.ts` scans the PTY byte stream for OSC 0/1/2 sequences as
+it arrives in `usePtySocket`, before the bytes are handed to the terminal. It
+is a pure incremental state machine, so a sequence split across frames is still
+recognised, and it only observes — every byte still reaches the core unchanged.
+
+#### Why tmux needs three options
+
+`tmuxArgs` sets three *session* options, scoped with `-t` so the user's global
+tmux configuration and their own sessions are untouched:
+
+| Option | Why |
+|---|---|
+| `set-titles on` | Off by default. While off tmux never emits the OSC sequence at all, and the header stays empty forever. |
+| `set-titles-string` | The format above. |
+| `status-interval 1` | tmux re-evaluates and emits the title on its **periodic status redraw**, not when the foreground command changes. |
+
+The last one is the subtle one and was found empirically. At the inherited
+interval (15s by default, 5s on the development machine) any command shorter
+than the interval starts and finishes between ticks, so its title is never
+emitted and the header silently misses most of what you run — a 3s `sleep`
+produced no title at all on either a fresh or a reattached session. At 1s it
+produced one every time. The cost is a status-line diff per second per pane,
+measured at roughly 35 bytes/sec.
+
+This also means titles are **eventually consistent, not instantaneous**: the
+header lags the shell by up to one status interval.
 
 ### Control messages
 

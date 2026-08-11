@@ -1,8 +1,67 @@
 .pane {
-  position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  padding: 0.2rem 0.5rem;
+  background: #161616;
+  border-bottom: 1px solid var(--divider);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #9a9a9a;
+  user-select: none;
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+/* Named `health*` rather than `pending`/`error`: a bare `.error` would collide
+   with the overlay message's `.error`, and CSS Modules would merge the two rule
+   bodies onto both elements. */
+.healthPending {
+  background: #d7ba7d;
+}
+
+.healthReady {
+  background: #6a9955;
+}
+
+.healthEnded {
+  background: #6a6a6a;
+}
+
+.healthError {
+  background: #f44747;
+}
+
+/* A long "command · directory" must not push the pane wider than its grid
+   track — the track is sized by the split percentages, not by content. */
+.title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Holds the terminal and its overlay. Separate from the pane so an overlay
+   covers only the terminal, leaving the header's title and status readable
+   while a pane is dead. */
+.body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .terminal {

@@ -141,3 +141,50 @@ test("shells survive a page reload", async ({ page }) => {
 
   await expect(pane(page, 2)).toContainText("PERSIST_MARKER");
 });
+
+test("each pane header shows a live title from tmux", async ({ page }) => {
+  await page.goto("/");
+
+  // The dot contributes no text, so the header's text content is the title.
+  const header = pane(page, 0).locator("header");
+
+  // Proves the whole chain, which no unit test can: tmuxArgs turns on tmux's
+  // `set-titles` (off by default, in which case tmux never emits the sequence
+  // at all), tmux expands set-titles-string and writes OSC 0 into the PTY, the
+  // server forwards it as a binary frame, and the client scanner lifts it out.
+  await expect(header).toHaveText(/zsh/, { timeout: 15_000 });
+
+  // ...and that it is live, not a one-shot read at connect time.
+  await typeInPane(page, 0, "sleep 4");
+  await expect(pane(page, 0)).toContainText("sleep 4");
+  await expect(header).toHaveText(/sleep/, { timeout: 15_000 });
+  await expect(header).toHaveText(/zsh/, { timeout: 20_000 });
+
+  // Health is exposed as a name, not colour alone.
+  await expect(pane(page, 0).getByRole("img", { name: "connected" })).toBeVisible();
+});
+
+test("a dead pane still shows its header above the overlay", async ({ page }) => {
+  await page.goto("/");
+
+  const dead = pane(page, PANE_COUNT - 1);
+  const header = dead.locator("header");
+  await expect(header).toHaveText(/zsh/, { timeout: 15_000 });
+
+  // Kill the session out from under the pane so its socket closes.
+  await execFileAsync("tmux", ["kill-session", "-t", `termsite-${PANE_COUNT - 1}`]);
+
+  await expect(dead.getByText(/session ended/i)).toBeVisible({ timeout: 15_000 });
+
+  // The point of putting the header outside the overlay's stacking context:
+  // a dead pane still tells you what it was. jsdom cannot check this — it does
+  // no layout — so the geometry is asserted here.
+  await expect(header).toBeVisible();
+  await expect(header).toHaveText(/zsh/);
+  await expect(dead.getByRole("img", { name: "session ended" })).toBeVisible();
+
+  const headerBox = await header.boundingBox();
+  const overlayBox = await dead.getByText(/session ended/i).boundingBox();
+  if (headerBox === null || overlayBox === null) throw new Error("no bounding box");
+  expect(headerBox.y + headerBox.height).toBeLessThanOrEqual(overlayBox.y);
+});
