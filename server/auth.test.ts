@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
-import { allowedOrigins, isOriginAllowed, isTokenValid } from "./auth";
+import { allowedOrigins, configuredOrigins, isOriginAllowed, isTokenValid } from "./auth";
 
 describe("allowedOrigins", () => {
   it("derives both loopback spellings from the configured port", () => {
@@ -74,5 +74,63 @@ describe("isTokenValid", () => {
       expect(body).toContain("timingSafeEqual(");
       expect(body).not.toMatch(/provided\s*===\s*expected/);
     });
+  });
+});
+
+describe("configuredOrigins", () => {
+  it("falls back to the derived loopback list when unset or blank", () => {
+    expect(configuredOrigins(undefined, 3000)).toEqual(allowedOrigins(3000));
+    expect(configuredOrigins("  ", 3000)).toEqual(allowedOrigins(3000));
+  });
+
+  it("uses the configured origins verbatim when set", () => {
+    expect(configuredOrigins("https://t.chadsho.me", 3000)).toEqual(["https://t.chadsho.me"]);
+  });
+
+  it("accepts a comma-separated list with whitespace", () => {
+    expect(configuredOrigins(" https://a.example , http://b.example:8080 ", 3000)).toEqual([
+      "https://a.example",
+      "http://b.example:8080",
+    ]);
+  });
+
+  it("replaces the loopback defaults rather than adding to them", () => {
+    // Behind a proxy the loopback origins are not reachable by any browser, so
+    // keeping them would widen the allowlist for no benefit.
+    const origins = configuredOrigins("https://t.chadsho.me", 3000);
+    expect(origins).not.toContain("http://localhost:3000");
+  });
+
+  it("does not match by suffix or wildcard", () => {
+    const origins = configuredOrigins("https://t.chadsho.me", 3000);
+    expect(isOriginAllowed("https://t.chadsho.me", origins)).toBe(true);
+    expect(isOriginAllowed("https://evil-t.chadsho.me", origins)).toBe(false);
+    expect(isOriginAllowed("https://t.chadsho.me.evil.example", origins)).toBe(false);
+    expect(isOriginAllowed("http://t.chadsho.me", origins)).toBe(false);
+    expect(isOriginAllowed("https://t.chadsho.me:8443", origins)).toBe(false);
+  });
+
+  it("throws on entries that are not a bare origin", () => {
+    for (const bad of [
+      "not a url",
+      "t.chadsho.me",
+      "ftp://t.chadsho.me",
+      "https://t.chadsho.me/path",
+      "https://user:pw@t.chadsho.me",
+      "*",
+      "https://*.chadsho.me",
+    ]) {
+      expect(() => configuredOrigins(bad, 3000)).toThrow();
+    }
+  });
+
+  it("throws when set to something that lists no origins at all", () => {
+    for (const bad of [",", " , ", ",,"]) {
+      expect(() => configuredOrigins(bad, 3000)).toThrow(/lists no origins/);
+    }
+  });
+
+  it("tolerates a single trailing slash, which URL normalises away", () => {
+    expect(configuredOrigins("https://t.chadsho.me/", 3000)).toEqual(["https://t.chadsho.me"]);
   });
 });

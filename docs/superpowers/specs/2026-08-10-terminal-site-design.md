@@ -38,7 +38,26 @@ Explicitly out of scope. Each is a reasonable follow-up, none is in this build:
 ## Threat model
 
 The server spawns a login shell with the full user environment. Anyone who can reach
-the port owns the machine. This is a personal, single-user, localhost-only tool.
+the port owns the machine — or, in a container, the container.
+
+There are two supported deployments, and they have different boundaries.
+
+**A. Direct on a workstation (the original).** Binds `127.0.0.1`, single-user,
+localhost-only. Everything in "What is defended" and "What is *not* defended" below
+describes this mode.
+
+**B. Containerised, behind an authenticated reverse proxy.** The shells are the
+*container's*, not the host's, so a compromise costs the container rather than the
+machine. Reachability is the container network, not loopback, so two things replace
+the loopback bind:
+
+- **No published port.** `docker-compose.yaml` uses `expose`, never `ports`. This is
+  the load-bearing line: publishing would put a shell on the host's interfaces.
+- **A trusted-peer check.** Every WebSocket upgrade is rejected unless the TCP peer
+  is inside `TRUSTED_PROXIES`. See "Running behind a proxy" below.
+
+`HOST` defaults to `127.0.0.1`, so mode A is what you get unless it is deliberately
+overridden.
 
 ### What is defended
 
@@ -83,6 +102,58 @@ shared machine.**
 
 The README must state plainly that this exposes a shell, is localhost-only, and is
 unsafe on a multi-user machine.
+
+### Running behind a proxy
+
+`X-Forwarded-For` authorises nothing. It is client-supplied, and nginx *appends* to
+it rather than replacing it, so a client can send `X-Forwarded-For: 10.0.0.1` and
+have that value survive as the leftmost entry. Any check that trusted the left of
+that header would be a bypass for anyone who can reach the port.
+
+The only unspoofable signal is the TCP peer, `req.socket.remoteAddress` — the address
+the kernel completed a handshake with. So the order is:
+
+1. Reject the upgrade unless the **peer** is inside `TRUSTED_PROXIES` (`server/forwarded.ts`).
+2. Reject unless `Origin` is in `ALLOWED_ORIGINS` — exact strings, no wildcards.
+3. Reject unless the first frame carries the boot token.
+
+Only after (1) is the forwarded chain walked, right-to-left past hops we trust, to
+work out the real client address. That result is used **for logging only**.
+
+Both trust lists throw at boot on a malformed entry rather than skipping it: a trust
+list that silently ignores what it cannot read leaves the operator believing a proxy
+is trusted when it is not.
+
+Deliberate limits, stated because they bound what this actually buys:
+
+- **The trusted network is as narrow as Docker allows, which is not very.** Container
+  addresses are assigned dynamically, so `TRUSTED_PROXIES` has to name the subnet
+  rather than one host. Every container on that network is therefore inside the trust
+  boundary. Keep the network to the proxy and the services it fronts.
+- **IPv4 only.** An address the parser cannot read is never trusted, so a genuine IPv6
+  peer fails closed rather than being waved through.
+- **The boot token does not keep a sibling container out.** `GET /` is not
+  peer-checked, so anything that can reach the port can fetch the page and read the
+  token out of the body — verified, not assumed. And peer-checking `GET /` would not
+  help while the trusted set is the whole subnet, because a sibling's own address is
+  inside it. The full chain for any container on the proxy network is: fetch `/`,
+  scrape the token, open the socket (peer check passes), set `Origin` by hand (trivial
+  off-browser), and get a shell. What the token actually defends against is a stale
+  page after a restart, and a request from outside the trusted set. Closing this needs
+  a static address for the proxy so `TRUSTED_PROXIES` can be a `/32`, not a doc change.
+
+- **The shells can reach everything the proxy fronts, from inside the auth wall.**
+  This is the direction that matters most and is easy to miss: the container joins the
+  proxy network, so its shells can talk to every other service on it, on its internal
+  port, bypassing the edge nginx and Authelia entirely. A foothold in a pane is a
+  foothold behind the auth wall for every application on that network. Putting
+  terminal-site on its own network, with the proxy attached to that, is the way to
+  bound it.
+
+- **A pane is root-equivalent inside the container.** The image runs as `node` so that
+  files written to the `/work` bind mount are owned by uid 1000 rather than root, but
+  it grants passwordless sudo so the box is usable for development. Running as a
+  non-root user is a host-file-ownership convenience here, not a security boundary.
 
 ## Architecture
 

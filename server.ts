@@ -4,14 +4,30 @@ import { parse } from "node:url";
 import next from "next";
 import * as pty from "node-pty";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { allowedOrigins, isOriginAllowed } from "./server/auth";
+import { configuredOrigins, isOriginAllowed } from "./server/auth";
+import { clientAddress, isTrustedPeer, parseTrustedProxies } from "./server/forwarded";
 import { attachPtySession, type PtyHandle, type SessionSocket } from "./server/pty-session";
 import { findTmux, tmuxEnv } from "./server/tmux";
+import { routeUpgrade } from "./server/upgrade";
 import { bootToken } from "./server/token";
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = "127.0.0.1";
+
+/**
+ * Loopback by default, so running this directly on a workstation is unchanged
+ * and unreachable from the network. A container has to override it: binding
+ * loopback inside a container binds *that namespace's* loopback, which no
+ * published port or sibling container can reach. Setting HOST=0.0.0.0 is only
+ * safe because the container publishes no port — see docker-compose.yaml.
+ */
+const hostname = process.env.HOST ?? "127.0.0.1";
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+
+/**
+ * Networks whose members may open a WebSocket. Checked against the TCP peer,
+ * never against a forwarded header. Defaults to loopback only.
+ */
+const trustedProxies = parseTrustedProxies(process.env.TRUSTED_PROXIES);
 
 const app = next({ dev, hostname, port, turbopack: dev });
 const handle = app.getRequestHandler();
@@ -79,7 +95,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const origins = allowedOrigins(port);
+  const origins = configuredOrigins(process.env.ALLOWED_ORIGINS, port);
   const env = tmuxEnv(process.env);
   const cwd = process.env.HOME ?? homedir();
   const token = bootToken();
@@ -99,23 +115,56 @@ async function main(): Promise<void> {
     console.error("terminal websocket server error:", error);
   });
 
+  /** Node hands over the raw socket on 'upgrade', errors included. */
+  function refuseUpgrade(socket: import("node:stream").Duplex, reason: string): void {
+    socket.on("error", () => {});
+    socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+    if (reason !== "") console.warn(reason);
+  }
+
   server.on("upgrade", (req, socket, head) => {
     const { pathname } = parse(req.url ?? "/", true);
 
-    if (pathname !== "/api/terminal") {
+    // The peer is the only address a client cannot forge, so it gates every
+    // upgrade before the path is even considered. Doing this after the path
+    // dispatch previously let an untrusted peer reach Next's own handler,
+    // which in production is an empty function: the socket was neither
+    // answered nor closed, and enough of them exhaust the process.
+    const route = routeUpgrade({
+      pathname,
+      peerTrusted: isTrustedPeer(req.socket.remoteAddress, trustedProxies),
+      dev,
+    });
+
+    if (route === "reject") {
+      refuseUpgrade(
+        socket,
+        `rejected upgrade to ${pathname ?? "?"} from ${req.socket.remoteAddress ?? "unknown"}`,
+      );
+      return;
+    }
+
+    if (route === "framework") {
       app.getUpgradeHandler()(req, socket, head);
       return;
     }
 
     if (!isOriginAllowed(req.headers.origin, origins)) {
-      // Node's 'upgrade' contract hands over the raw socket, errors included.
-      // A peer that resets the connection mid-rejection would otherwise emit
-      // an unhandled 'error' and throw out of the event loop.
-      socket.on("error", () => {});
-      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
+      refuseUpgrade(socket, "");
       return;
     }
+
+    // Derived only after the peer check has passed, and used only for the log
+    // line: X-Forwarded-For is client-supplied and authorises nothing.
+    const client = clientAddress(
+      req.headers["x-forwarded-for"] === undefined
+        ? undefined
+        : String(req.headers["x-forwarded-for"]),
+      req.socket.remoteAddress,
+      trustedProxies,
+    );
+    console.log(`terminal upgrade accepted for client ${client ?? "unknown"}`);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       // `ws` emits 'error' on the WebSocket itself for receiver faults —

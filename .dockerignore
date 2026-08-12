@@ -1,0 +1,28 @@
+# node_modules is rebuilt inside the image: the host's copy has darwin-arm64
+# node-pty binaries, which are useless on linux and would be silently copied
+# over the ones `npm ci` just compiled.
+node_modules
+
+.next
+out
+playwright-report
+test-results
+coverage
+
+.git
+.gitignore
+.superpowers
+
+# Never bake a local env file into an image. It is the file most likely to hold
+# something that should not be in a layer, and layers are not secret.
+.env
+.env.*
+!.env.example
+
+Dockerfile
+docker-compose.yaml
+.dockerignore
+
+npm-debug.log*
+*.tsbuildinfo
+.DS_Store

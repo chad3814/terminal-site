@@ -5,3 +5,8 @@ next-env.d.ts
 playwright-report/
 test-results/
 .DS_Store
+
+# Deployment-specific, and names the trusted networks. .env.example is tracked.
+.env
+.env.*
+!.env.example

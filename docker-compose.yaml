@@ -1,0 +1,96 @@
+# terminal-site behind zeus's nginx-proxy.
+#
+#   browser
+#     -> Pi edge nginx + Authelia   (chadsho-pi-edge-stack, the auth wall)
+#     -> zeus nginx-proxy            (nginxproxy/nginx-proxy, dispatches by Host)
+#     -> this container
+#
+# Copy .env.example to .env and fill it in. Every value there is deployment
+# specific and none of them have a safe default.
+
+name: terminal-site
+
+services:
+  terminal-site:
+    build: .
+    container_name: terminal-site
+    restart: unless-stopped
+
+    # `expose`, never `ports`.
+    #
+    # This is the load-bearing line. The container serves a shell, and the only
+    # thing between that shell and the internet is that no host port is
+    # published: reachability is limited to the proxy network. Adding a `ports:`
+    # entry here would bind it on the host — `0.0.0.0` unless explicitly
+    # prefixed — and hand out a shell to anything that can route to the box.
+    #
+    # `expose` publishes nothing; it is documentation plus a hint for
+    # nginx-proxy. Sibling containers on the network can reach the port
+    # regardless, which is what TRUSTED_PROXIES is for.
+    expose:
+      - "3000"
+
+    environment:
+      # Loopback inside a container is that namespace's loopback, which the
+      # proxy cannot reach. Safe here only because no port is published.
+      HOST: 0.0.0.0
+      PORT: "3000"
+
+      # Which peers may open a WebSocket, checked against the TCP peer address.
+      # Must cover the nginx-proxy container's address on this network. Find the
+      # subnet with:
+      #   docker network inspect <network> -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+      #
+      # This is as narrow as Docker networking allows: addresses are assigned
+      # dynamically, so it has to be the subnet rather than one host. Every
+      # container on this network is therefore inside the trust boundary — keep
+      # the network to the proxy and the services it fronts, and rely on the
+      # boot token and Authelia for the rest.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:?set TRUSTED_PROXIES in .env}
+
+      # The browser sends the public origin, not this container's address, so
+      # the derived loopback allowlist would reject every upgrade. Exact
+      # origins only; no wildcards.
+      ALLOWED_ORIGINS: https://${VIRTUAL_HOST:?set VIRTUAL_HOST in .env}
+
+      # nginx-proxy discovery. VIRTUAL_PORT must match PORT above: the Origin
+      # check compares against ALLOWED_ORIGINS, so a mismatched public port
+      # would 403 every socket.
+      VIRTUAL_HOST: ${VIRTUAL_HOST}
+      VIRTUAL_PORT: "3000"
+
+      TZ: ${TZ:-America/Chicago}
+
+    volumes:
+      # Survives `docker compose down`: shell history, config, anything left
+      # in ~. The tmux sessions themselves do not — they are process state, so
+      # panes come back as fresh shells in a preserved home.
+      - home:/home/node
+
+      # A hole from the container back to the host filesystem, deliberately.
+      # Anything with a shell in this container can read and write everything
+      # under it, so point it at a work directory and nothing wider — never at
+      # /fast/config (zeus's compose files and secrets) or a parent of it.
+      - ${WORK_DIR:?set WORK_DIR in .env}:/work
+
+    # A pane is a shell: a fork bomb or a runaway process there competes with
+    # everything else on the host. These are ceilings, not tuning.
+    pids_limit: 512
+    mem_limit: 4g
+    # no-new-privileges is deliberately NOT set: the image grants the pane user
+    # passwordless sudo so the box is usable for development, and that needs
+    # setuid. Drop the sudoers line in the Dockerfile if you want to add it.
+
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    # Created by zeus's stack, not this one. Compose prefixes network names with
+    # the project directory, so /fast/config/docker-compose.yaml's `proxy` is
+    # `config_proxy` on the host. Confirm with `docker network ls`.
+    external: true
+    name: ${PROXY_NETWORK:-config_proxy}
+
+volumes:
+  home:
